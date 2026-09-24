@@ -11,6 +11,8 @@ import { formatCommandFailure, runCommand } from "./process.mjs";
 // Ignored dependency directories that a fresh worktree lacks and Codex cannot reinstall offline.
 export const DEFAULT_LINKED_DIRS = ["node_modules", ".venv", "venv"];
 const REF_PREFIX = "refs/codex-companion/tickets";
+const JOURNAL_VERSION = 1;
+const JOURNAL_MANIFEST = "manifest.json";
 const SNAPSHOT_IDENTITY = {
   GIT_AUTHOR_NAME: "Codex Companion",
   GIT_AUTHOR_EMAIL: "codex-companion@localhost",
@@ -48,6 +50,96 @@ function commitTree(repoRoot, tree, parent, message) {
 
 function pinRef(repoRoot, ticketId, name, commit) {
   gitChecked(repoRoot, ["update-ref", `${REF_PREFIX}/${ticketId}/${name}`, commit]);
+}
+
+function readRef(repoRoot, ref) {
+  const result = git(repoRoot, ["rev-parse", "--verify", "--quiet", ref]);
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status === 1) {
+    return null;
+  }
+  if (result.status !== 0) {
+    throw new Error(formatCommandFailure(result));
+  }
+  return result.stdout.trim();
+}
+
+function isInside(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function pathTraversalError(filePath) {
+  const error = new Error(`Refusing to integrate ${filePath}: path traverses a symlink.`);
+  error.code = "ERR_INTEGRATION_PATH_TRAVERSAL";
+  return error;
+}
+
+/** Validate without following any ancestor symlink in the checkout. */
+function assertSafeTarget(repoRoot, filePath) {
+  const root = path.resolve(repoRoot);
+  const target = path.resolve(root, filePath);
+  if (target === root || !isInside(root, target)) {
+    throw pathTraversalError(filePath);
+  }
+
+  const realRoot = fs.realpathSync(root);
+  const parent = path.dirname(target);
+  const relativeParent = path.relative(root, parent);
+  let cursor = root;
+  let nearestExisting = root;
+  for (const part of relativeParent === "" ? [] : relativeParent.split(path.sep)) {
+    cursor = path.join(cursor, part);
+    let stat;
+    try {
+      stat = fs.lstatSync(cursor);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        break;
+      }
+      if (error.code === "ENOTDIR") {
+        throw pathTraversalError(filePath);
+      }
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      throw pathTraversalError(filePath);
+    }
+    if (!stat.isDirectory()) {
+      throw pathTraversalError(filePath);
+    }
+    nearestExisting = cursor;
+  }
+
+  const realParent = fs.realpathSync(nearestExisting);
+  if (!isInside(realRoot, realParent)) {
+    throw pathTraversalError(filePath);
+  }
+  return target;
+}
+
+function ensureSafeParent(repoRoot, filePath) {
+  const root = path.resolve(repoRoot);
+  const target = assertSafeTarget(root, filePath);
+  const relativeParent = path.relative(root, path.dirname(target));
+  let cursor = root;
+  for (const part of relativeParent === "" ? [] : relativeParent.split(path.sep)) {
+    cursor = path.join(cursor, part);
+    try {
+      const stat = fs.lstatSync(cursor);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw pathTraversalError(filePath);
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+      fs.mkdirSync(cursor);
+    }
+  }
+  return assertSafeTarget(root, filePath);
 }
 
 /**
@@ -117,8 +209,11 @@ function readWorkingFile(filePath) {
   let stat;
   try {
     stat = fs.lstatSync(filePath);
-  } catch {
-    return null;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
   }
   if (stat.isSymbolicLink()) {
     return { mode: "120000", content: Buffer.from(fs.readlinkSync(filePath)) };
@@ -164,16 +259,182 @@ function mergeText(repoRoot, ours, base, theirs, labels) {
   }
 }
 
-function writeEntry(target, entry) {
-  fs.rmSync(target, { force: true });
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  if (entry.mode === "120000") {
-    fs.symlinkSync(entry.content.toString(), target);
+function captureTarget(target, journalDir, index) {
+  let stat;
+  try {
+    stat = fs.lstatSync(target);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { kind: "absent" };
+    }
+    throw error;
+  }
+
+  const dataFile = `${index}.bin`;
+  const dataPath = path.join(journalDir, dataFile);
+  if (stat.isSymbolicLink()) {
+    fs.writeFileSync(dataPath, fs.readlinkSync(target, { encoding: "buffer" }));
+    return { kind: "symlink", dataFile };
+  }
+  if (!stat.isFile()) {
+    throw new Error(`Cannot journal non-file integration target: ${target}`);
+  }
+  fs.copyFileSync(target, dataPath);
+  return { kind: "file", mode: stat.mode & 0o7777, dataFile };
+}
+
+function writeManifest(journalDir, manifest) {
+  const temporary = path.join(journalDir, `${JOURNAL_MANIFEST}.tmp`);
+  fs.writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
+  fs.renameSync(temporary, path.join(journalDir, JOURNAL_MANIFEST));
+}
+
+function createIntegrationJournal({ repoRoot, ticketId, journalDir, plan, integratedCommit }) {
+  const integratedRef = `${REF_PREFIX}/${ticketId}/integrated`;
+  fs.mkdirSync(path.dirname(journalDir), { recursive: true });
+  fs.mkdirSync(journalDir);
+  try {
+    const entries = plan
+      .filter((step) => step.action === "write" || step.action === "delete")
+      .map((step, index) => {
+        const target = assertSafeTarget(repoRoot, step.path);
+        return { path: step.path, state: captureTarget(target, journalDir, index) };
+      });
+    const manifest = {
+      version: JOURNAL_VERSION,
+      repoRoot: path.resolve(repoRoot),
+      integratedRef,
+      previousIntegratedCommit: readRef(repoRoot, integratedRef),
+      intendedIntegratedCommit: integratedCommit,
+      entries
+    };
+    writeManifest(journalDir, manifest);
+    return manifest;
+  } catch (error) {
+    fs.rmSync(journalDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function removeEmptyParents(repoRoot, target) {
+  const root = path.resolve(repoRoot);
+  let parent = path.dirname(target);
+  while (parent !== root && isInside(root, parent)) {
+    try {
+      fs.rmdirSync(parent);
+    } catch {
+      break;
+    }
+    parent = path.dirname(parent);
+  }
+}
+
+function restoreTarget(repoRoot, journalDir, entry) {
+  const target = assertSafeTarget(repoRoot, entry.path);
+  if (entry.state.kind === "absent") {
+    fs.rmSync(target, { force: true });
+    removeEmptyParents(repoRoot, target);
     return;
   }
-  fs.writeFileSync(target, entry.content);
+
+  const safeTarget = ensureSafeParent(repoRoot, entry.path);
+  fs.rmSync(safeTarget, { force: true });
+  const data = fs.readFileSync(path.join(journalDir, entry.state.dataFile));
+  const checkedTarget = assertSafeTarget(repoRoot, entry.path);
+  if (entry.state.kind === "symlink") {
+    fs.symlinkSync(data, checkedTarget);
+    return;
+  }
+  if (entry.state.kind !== "file" || !Number.isInteger(entry.state.mode)) {
+    throw new Error(`Invalid integration journal entry for ${entry.path}.`);
+  }
+  fs.writeFileSync(checkedTarget, data);
   if (process.platform !== "win32") {
-    fs.chmodSync(target, entry.mode === "100755" ? 0o755 : 0o644);
+    fs.chmodSync(checkedTarget, entry.state.mode);
+  }
+}
+
+function restoreIntegratedRef(repoRoot, manifest) {
+  const current = readRef(repoRoot, manifest.integratedRef);
+  if (current === manifest.previousIntegratedCommit) {
+    return;
+  }
+  if (current !== manifest.intendedIntegratedCommit) {
+    throw new Error(`Refusing to overwrite ${manifest.integratedRef}: it changed after the integration journal was created.`);
+  }
+  if (manifest.previousIntegratedCommit) {
+    gitChecked(repoRoot, ["update-ref", manifest.integratedRef, manifest.previousIntegratedCommit]);
+  } else if (current) {
+    gitChecked(repoRoot, ["update-ref", "-d", manifest.integratedRef]);
+  }
+}
+
+function restoreIntegrationJournal({ repoRoot, journalDir, manifest }) {
+  const errors = [];
+  const restored = [];
+  for (const entry of manifest.entries) {
+    try {
+      restoreTarget(repoRoot, journalDir, entry);
+      restored.push(entry.path);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  try {
+    restoreIntegratedRef(repoRoot, manifest);
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, `Failed to restore interrupted integration from ${journalDir}.`);
+  }
+  fs.rmSync(journalDir, { recursive: true, force: true });
+  return restored;
+}
+
+/** Restore the lead checkout and integration ref from a journal left by an interrupted apply. */
+export function recoverInterruptedIntegration({ repoRoot, worktree, journalDir = `${worktree.path}.integration-journal` }) {
+  let journalStat;
+  try {
+    journalStat = fs.lstatSync(journalDir);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { recovered: false, journalDir, restored: [] };
+    }
+    throw error;
+  }
+  if (journalStat.isSymbolicLink() || !journalStat.isDirectory()) {
+    throw new Error(`Refusing unsafe integration journal path: ${journalDir}`);
+  }
+
+  const manifestPath = path.join(journalDir, JOURNAL_MANIFEST);
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`Refusing incomplete integration journal without a manifest: ${journalDir}`);
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  if (
+    manifest.version !== JOURNAL_VERSION ||
+    manifest.repoRoot !== path.resolve(repoRoot) ||
+    !Array.isArray(manifest.entries) ||
+    typeof manifest.integratedRef !== "string"
+  ) {
+    throw new Error(`Invalid integration journal manifest: ${manifestPath}`);
+  }
+  const restored = restoreIntegrationJournal({ repoRoot, journalDir, manifest });
+  return { recovered: true, journalDir, restored };
+}
+
+function writeEntry(repoRoot, filePath, entry) {
+  const target = ensureSafeParent(repoRoot, filePath);
+  fs.rmSync(target, { force: true });
+  const checkedTarget = assertSafeTarget(repoRoot, filePath);
+  if (entry.mode === "120000") {
+    fs.symlinkSync(entry.content.toString(), checkedTarget);
+    return;
+  }
+  fs.writeFileSync(checkedTarget, entry.content);
+  if (process.platform !== "win32") {
+    fs.chmodSync(checkedTarget, entry.mode === "100755" ? 0o755 : 0o644);
   }
 }
 
@@ -183,17 +444,29 @@ function writeEntry(target, entry) {
  * written unless every file merges cleanly, or `allowConflicts` is set (conflict markers are then
  * written for text files). The lead's index is never touched.
  */
-export function integrateWorktree({ repoRoot, worktree, ticketId, allowConflicts = false }) {
+export function integrateWorktree({ repoRoot, worktree, ticketId, allowConflicts = false, journalDir = `${worktree.path}.integration-journal` }) {
+  const recovery = recoverInterruptedIntegration({ repoRoot, worktree, journalDir });
   const base = worktree.integrationBase ?? worktree.baseCommit;
   const { tree: theirsTree, changes } = collectWorktreeChanges(worktree);
   const plan = [];
   const conflicts = [];
+  let unsafePath = false;
 
   for (const change of changes) {
     const baseEntry = readTreeEntry(repoRoot, base, change.path);
     const theirsEntry = readTreeEntry(repoRoot, theirsTree, change.path);
-    const oursEntry = readWorkingFile(path.join(repoRoot, change.path));
-    const target = path.join(repoRoot, change.path);
+    let target;
+    try {
+      target = assertSafeTarget(repoRoot, change.path);
+    } catch (error) {
+      if (error.code !== "ERR_INTEGRATION_PATH_TRAVERSAL") {
+        throw error;
+      }
+      conflicts.push({ path: change.path, reason: "path traverses a symlink" });
+      unsafePath = true;
+      continue;
+    }
+    const oursEntry = readWorkingFile(target);
 
     if (sameContent(oursEntry, baseEntry)) {
       plan.push({ path: change.path, target, action: theirsEntry ? "write" : "delete", entry: theirsEntry, status: change.status });
@@ -232,26 +505,53 @@ export function integrateWorktree({ repoRoot, worktree, ticketId, allowConflicts
     });
   }
 
-  if (conflicts.length > 0 && !allowConflicts) {
-    return { applied: false, conflicts, files: plan.map(({ path: filePath, action, status }) => ({ path: filePath, action, status })), theirsTree };
+  if (unsafePath || (conflicts.length > 0 && !allowConflicts)) {
+    return { applied: false, conflicts, files: plan.map(({ path: filePath, action, status }) => ({ path: filePath, action, status })), theirsTree, recovery };
   }
 
-  for (const step of plan) {
-    if (step.action === "write") {
-      writeEntry(step.target, step.entry);
-    } else if (step.action === "delete") {
-      fs.rmSync(step.target, { force: true });
-    }
-  }
-
+  // Creating the commit object cannot alter the checkout or record a completed integration, so do
+  // it before opening the journal and applying any files.
   const integratedCommit = commitTree(repoRoot, theirsTree, base, `codex ticket ${ticketId}: integrated state`);
-  pinRef(repoRoot, ticketId, "integrated", integratedCommit);
+  const mutablePlan = plan.filter((step) => step.action === "write" || step.action === "delete");
+  let manifest = null;
+  if (mutablePlan.length > 0) {
+    manifest = createIntegrationJournal({ repoRoot, ticketId, journalDir, plan: mutablePlan, integratedCommit });
+  }
+
+  try {
+    for (const step of mutablePlan) {
+      // Re-check at the last possible point so a parent replaced after planning cannot redirect an
+      // integration write outside the checkout.
+      assertSafeTarget(repoRoot, step.path);
+      if (step.action === "write") {
+        writeEntry(repoRoot, step.path, step.entry);
+      } else {
+        fs.rmSync(assertSafeTarget(repoRoot, step.path), { force: true });
+      }
+    }
+    pinRef(repoRoot, ticketId, "integrated", integratedCommit);
+    if (manifest) {
+      fs.rmSync(journalDir, { recursive: true });
+    }
+  } catch (error) {
+    if (!manifest) {
+      throw error;
+    }
+    try {
+      restoreIntegrationJournal({ repoRoot, journalDir, manifest });
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], `Integration failed and rollback was incomplete; recovery journal retained at ${journalDir}.`);
+    }
+    throw error;
+  }
+
   return {
     applied: true,
     conflicts,
     files: plan.map(({ path: filePath, action, status }) => ({ path: filePath, action, status })),
     theirsTree,
-    integratedCommit
+    integratedCommit,
+    recovery
   };
 }
 
