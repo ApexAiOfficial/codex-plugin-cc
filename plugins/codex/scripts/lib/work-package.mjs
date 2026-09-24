@@ -5,6 +5,7 @@ import { interpolateTemplate, loadPromptTemplate } from "./prompts.mjs";
 
 export const TICKET_ROLES = new Set(["implement", "investigate", "review"]);
 const REPORT_STATUSES = new Set(["completed", "partial", "blocked", "failed"]);
+const BLOCKER_KINDS = new Set(["dependency", "network", "credential", "service", "permission", "scope", "ambiguity", "other"]);
 
 const ROLE_CONTRACTS = {
   implement: [
@@ -179,7 +180,7 @@ export function parseWorkReport(rawOutput) {
         confidence: Number.isFinite(finding.confidence) ? finding.confidence : null
       })),
       blockers: asObjectArray(data.blockers).map((blocker) => ({
-        kind: String(blocker.kind ?? "other").trim(),
+        kind: BLOCKER_KINDS.has(String(blocker.kind ?? "").trim()) ? String(blocker.kind).trim() : "other",
         detail: String(blocker.detail ?? "").trim(),
         neededFromLead: String(blocker.needed_from_lead ?? "").trim()
       })),
