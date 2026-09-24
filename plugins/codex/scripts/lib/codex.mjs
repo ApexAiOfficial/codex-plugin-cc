@@ -31,6 +31,7 @@
  *   messages: Array<{ lifecycle: string, phase: string | null, text: string }>,
  *   fileChanges: ThreadItem[],
  *   commandExecutions: ThreadItem[],
+ *   tokenUsage: import("./app-server-protocol").ThreadTokenUsage | null,
  *   onProgress: ProgressReporter | null
  * }} TurnCaptureState
  */
