@@ -236,11 +236,34 @@ test("read-only roles run in a read-only sandbox and network is only granted exp
   const ctx = setupRepo();
   delegateAndWait(ctx, ["--ticket", "probe", "--role", "investigate", "Why is it slow?"]);
   assert.equal(ctx.fakeState().lastTurnStart.sandboxPolicy.type, "readOnly");
-  assert.match(ctx.fakeState().lastTurnStart.prompt, /read-only investigation/);
+  assert.match(ctx.fakeState().lastTurnStart.prompt, /This is an investigation, not an implementation/);
+  assert.match(ctx.fakeState().lastTurnStart.prompt, /Read-only package: you own no files/);
 
   delegateAndWait(ctx, ["--ticket", "net", "--network", "Fetch something.\nFAKE_WRITE src/n.js 1"]);
   assert.equal(ctx.fakeState().lastTurnStart.sandboxPolicy.networkAccess, true);
   assert.match(ctx.fakeState().lastTurnStart.prompt, /Network access is enabled/);
+});
+
+test("investigate tickets can experiment in a scratch worktree that is never integrated", () => {
+  const ctx = setupRepo();
+  const { launched, waited } = delegateAndWait(ctx, [
+    "--ticket", "repro",
+    "--role", "investigate",
+    "--isolation", "worktree",
+    "Reproduce the bug.\nFAKE_WRITE src/app.js // instrumented"
+  ]);
+  const turnStart = ctx.fakeState().lastTurnStart;
+  assert.equal(turnStart.sandboxPolicy.type, "workspaceWrite");
+  assert.equal(turnStart.cwd, launched.workdir);
+  assert.match(turnStart.prompt, /disposable scratch worktree/);
+  assert.equal(waited.job.result.evidence.ownership, null);
+  assert.equal(fs.readFileSync(path.join(ctx.repo, "src", "app.js"), "utf8"), "export const value = 1;\n");
+  assert.deepEqual(companionJson(["verify", "repro"], { cwd: ctx.repo, env: ctx.env }).verification.problems, []);
+  const integrate = companion(["integrate", "repro"], { cwd: ctx.repo, env: ctx.env });
+  assert.notEqual(integrate.status, 0);
+  assert.match(integrate.stderr, /scratch worktree holds experiments/);
+  companionJson(["close", "repro", "--accepted", "--reason", "root cause found"], { cwd: ctx.repo, env: ctx.env });
+  assert.equal(fs.existsSync(launched.workdir), false);
 });
 
 test("infrastructure failures are classified separately from bad work", () => {

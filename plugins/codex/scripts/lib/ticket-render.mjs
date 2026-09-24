@@ -34,7 +34,10 @@ function listFiles(paths) {
 }
 
 function describeWhere(ticket) {
-  const parts = [ticket.role, ticket.isolation === "worktree" ? "worktree" : ticket.sandbox?.write ? "shared checkout" : "read-only"];
+  const parts = [
+    ticket.role,
+    ticket.isolation === "worktree" ? (ticket.role === "implement" ? "worktree" : "scratch worktree") : ticket.sandbox?.write ? "shared checkout" : "read-only"
+  ];
   if (ticket.sandbox?.network) {
     parts.push("network");
   }

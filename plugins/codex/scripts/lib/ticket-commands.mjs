@@ -315,7 +315,7 @@ export async function runTicketTurn(request, ctx, { progress, jobId }) {
     let preflight = readCachedPreflight(workspaceRoot, profile);
     if (!preflight) {
       progress?.({ message: "Probing the Codex sandbox environment.", phase: "starting" });
-      preflight = await runPreflight(workspaceRoot, { ...profile, direct: true }).catch((error) => {
+      preflight = await runPreflight(workspaceRoot, profile).catch((error) => {
         progress?.(`Sandbox preflight failed: ${error.message}`);
         return null;
       });
@@ -367,7 +367,7 @@ export async function runTicketTurn(request, ctx, { progress, jobId }) {
         ? buildTurnEvidence({
             workdir,
             isolation: ticket.isolation,
-            owns: ticket.role === "implement" ? ticket.owns : ["(read-only package)"],
+            owns: ticket.role === "implement" ? ticket.owns : ticket.isolation === "worktree" ? null : ["(read-only package)"],
             startTree,
             endTree,
             headAtStart,
@@ -459,14 +459,16 @@ async function handleDelegate(argv, ctx) {
   if (!TICKET_ROLES.has(role)) {
     throw new Error(`Unknown role "${role}". Use implement, investigate, or review.`);
   }
-  const write = role === "implement" && !options["read-only"];
   const isolation = options.isolation ?? "shared";
   if (!["shared", "worktree"].includes(isolation)) {
     throw new Error(`Unknown isolation "${isolation}". Use shared or worktree.`);
   }
-  if (isolation === "worktree" && !write) {
-    throw new Error("Worktree isolation only applies to write-capable implement tickets.");
+  if (isolation === "worktree" && options["read-only"]) {
+    throw new Error("--read-only and --isolation worktree are mutually exclusive.");
   }
+  // Investigate/review tickets are read-only in the shared checkout. In a worktree they get a
+  // disposable scratch copy they may modify to reproduce and experiment; it is never integrated.
+  const write = role === "implement" ? !options["read-only"] : isolation === "worktree";
 
   const tickets = reconcileWorkspace(workspaceRoot);
   const maxParallel = Number(getConfig(workspaceRoot).maxParallelTickets) || DEFAULT_MAX_PARALLEL_TICKETS;
@@ -503,7 +505,7 @@ async function handleDelegate(argv, ctx) {
       brief,
       workspaceRoot,
       workdir,
-      isolation: write ? isolation : "shared",
+      isolation,
       worktree,
       sandbox: { write, network: Boolean(options.network) },
       owns,
@@ -839,7 +841,7 @@ async function handleVerify(argv, ctx) {
     if (attributed.length === 0) {
       problems.push("Codex made no attributable file changes.");
     }
-  } else if (attributed.length > 0) {
+  } else if (attributed.length > 0 && ticket.isolation !== "worktree") {
     problems.push(`A read-only ${ticket.role} ticket changed files: ${attributed.join(", ")}`);
   }
   for (const claim of payload?.claims ?? []) {
@@ -881,6 +883,9 @@ async function handleIntegrate(argv, ctx) {
   const ticket = requireTicket(workspaceRoot, positionals[0]);
   if (ticket.isolation !== "worktree" || !ticket.worktree) {
     throw new Error(`Ticket ${ticket.id} worked directly in your checkout; there is nothing to integrate.`);
+  }
+  if (ticket.role !== "implement") {
+    throw new Error(`Ticket ${ticket.id} is a ${ticket.role} ticket; its scratch worktree holds experiments, not changes to integrate.`);
   }
   if (ticket.state === "running") {
     throw new Error(`Ticket ${ticket.id} is still running.`);
@@ -949,7 +954,7 @@ async function handleClose(argv, ctx) {
     throw new Error(`Ticket ${ticket.id} is still running. Cancel it first with \`cancel ${ticket.id}\`.`);
   }
   const decision = decisions[0];
-  if (decision === "accepted" && ticket.worktree && !ticket.worktree.removedAt && fs.existsSync(ticket.workdir) && !options.force) {
+  if (decision === "accepted" && ticket.role === "implement" && ticket.worktree && !ticket.worktree.removedAt && fs.existsSync(ticket.workdir) && !options.force) {
     const pending = collectWorktreeChanges(ticket.worktree).changes;
     if (pending.length > 0) {
       throw new Error(

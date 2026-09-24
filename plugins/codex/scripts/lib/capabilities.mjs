@@ -15,6 +15,9 @@ const OUTPUT_TAIL_BYTES = 4000;
 const DEFAULT_TOOLS = ["node", "npm", "pnpm", "yarn", "bun", "python3", "pip3", "uv", "pytest", "cargo", "go", "make", "docker", "git"];
 
 // Runs identically on the host and inside the Codex sandbox; prints one JSON object.
+// Availability is judged by exit status alone: inside the Codex Linux sandbox, spawnSync runs the
+// child successfully yet still reports error EPERM (a denied post-spawn syscall) and can lose the
+// child's stdout, so r.error or empty output would misreport working tools as missing.
 const PROBE_SCRIPT = `
 const cp = require("child_process"), fs = require("fs"), path = require("path"), dns = require("dns");
 const tools = JSON.parse(process.argv[2] || "[]");
@@ -22,7 +25,8 @@ const out = { tools: {}, write: null, gitWrite: null, dockerDaemon: null, networ
 const shell = process.platform === "win32";
 for (const tool of tools) {
   const r = cp.spawnSync(tool, ["--version"], { encoding: "utf8", timeout: 5000, shell });
-  out.tools[tool] = !r.error && r.status === 0 ? String(r.stdout || r.stderr).trim().split(/\\r?\\n/)[0].slice(0, 80) : null;
+  const text = String(r.stdout || r.stderr || "").trim();
+  out.tools[tool] = r.status === 0 ? text.split(/\\r?\\n/)[0].slice(0, 80) || "available" : null;
 }
 function canWrite(dir) {
   const probe = path.join(dir, ".codex-preflight-" + process.pid);
@@ -33,7 +37,7 @@ const gitDir = cp.spawnSync("git", ["rev-parse", "--git-common-dir"], { encoding
 out.gitWrite = gitDir.status === 0 ? canWrite(path.resolve(String(gitDir.stdout).trim())) : null;
 if (out.tools.docker) {
   const d = cp.spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8", timeout: 8000, shell });
-  out.dockerDaemon = !d.error && d.status === 0;
+  out.dockerDaemon = d.status === 0;
 }
 const timer = setTimeout(() => { out.network = false; finish(); }, 5000);
 let done = false;
@@ -137,7 +141,7 @@ export function readCachedPreflight(workspaceRoot, { workdir, write, network }) 
  * Measure what a Codex worker with this sandbox profile can actually do, using the app-server's
  * `command/exec` under the exact sandbox policy a ticket turn will use. No model is involved.
  */
-export async function runPreflight(workspaceRoot, { workdir, write, network, checks = [], tools = DEFAULT_TOOLS, direct = false }) {
+export async function runPreflight(workspaceRoot, { workdir, write, network, checks = [], tools = DEFAULT_TOOLS }) {
   const policy = buildSandboxPolicy({ workdir, write, network });
   const host = runHostProbe(workdir, tools);
   const { sandbox, checkResults } = await withCodexClient(
@@ -171,7 +175,9 @@ export async function runPreflight(workspaceRoot, { workdir, write, network, che
       }
       return { sandbox: parseProbe(probe.stdout), checkResults: results };
     },
-    { direct }
+    // A short-lived private app-server: preflight is rare, and starting the shared broker here
+    // would leave a long-lived process behind whenever no Claude session later ends it.
+    { direct: true }
   );
 
   const report = {
