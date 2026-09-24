@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
@@ -13,12 +15,14 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
+import { renderSessionLedger } from "./lib/ticket-commands.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
+const COMPANION_ENV = "CODEX_COMPANION";
+const COMPANION_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-companion.mjs");
 
 function readHookInput() {
   const raw = fs.readFileSync(0, "utf8").trim();
@@ -39,45 +43,28 @@ function appendEnvVar(name, value) {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
-function cleanupSessionJobs(cwd, sessionId) {
-  if (!cwd || !sessionId) {
-    return;
-  }
-
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const stateFile = resolveStateFile(workspaceRoot);
-  if (!fs.existsSync(stateFile)) {
-    return;
-  }
-
-  const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
-  if (removedJobs.length === 0) {
-    return;
-  }
-
-  for (const job of removedJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
-      continue;
-    }
-    try {
-      terminateProcessTree(job.pid ?? Number.NaN);
-    } catch {
-      // Ignore teardown failures during session shutdown.
-    }
-  }
-
-  saveState(workspaceRoot, {
-    ...state,
-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
-  });
-}
-
 function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
+  // The Bash tool does not see CLAUDE_PLUGIN_ROOT, so give Claude a stable handle on the runtime.
+  appendEnvVar(COMPANION_ENV, COMPANION_SCRIPT);
+  if (process.env.CLAUDE_ENV_FILE) {
+    // Hints rendered below may then use "$CODEX_COMPANION", which the export above guarantees.
+    process.env[COMPANION_ENV] = COMPANION_SCRIPT;
+  }
+
+  // Open tickets outlive sessions and compaction; surface them so Claude never loses track.
+  // SessionStart stdout is added to Claude's context. Stay silent when there is nothing open.
+  try {
+    const cwd = input.cwd || process.cwd();
+    const ledger = renderSessionLedger(resolveWorkspaceRoot(cwd), COMPANION_SCRIPT);
+    if (ledger) {
+      process.stdout.write(ledger);
+    }
+  } catch {
+    // Never let ledger rendering break session startup.
+  }
 }
 
 async function handleSessionEnd(input) {
@@ -101,7 +88,9 @@ async function handleSessionEnd(input) {
     await sendBrokerShutdown(brokerEndpoint);
   }
 
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  // Jobs are deliberately left alone. Background workers own a private app-server (not this
+  // session's broker), so they finish and persist their results after the session ends. That
+  // matters because SessionEnd also fires on /clear and resume, not only on a real exit.
   teardownBrokerSession({
     endpoint: brokerEndpoint,
     pidFile,

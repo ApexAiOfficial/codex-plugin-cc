@@ -4,6 +4,22 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+// Tests must not inherit the host Claude session's plugin wiring. When the suite runs inside a
+// Claude Code session with this plugin installed, these variables point at the user's real
+// session and plugin data directory, which both leaks state into tests and pollutes that directory.
+for (const name of [
+  "CODEX_COMPANION_SESSION_ID",
+  "CODEX_COMPANION_TRANSCRIPT_PATH",
+  "CODEX_COMPANION_APP_SERVER_ENDPOINT",
+  "CODEX_COMPANION_APP_SERVER_PID_FILE",
+  "CODEX_COMPANION_APP_SERVER_LOG_FILE",
+  "CODEX_COMPANION",
+  "CLAUDE_PLUGIN_DATA",
+  "CLAUDE_ENV_FILE"
+]) {
+  delete process.env[name];
+}
+
 export function makeTempDir(prefix = "codex-plugin-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }

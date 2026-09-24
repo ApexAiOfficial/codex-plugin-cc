@@ -332,6 +332,7 @@ function createTurnCaptureState(threadId, options = {}) {
     messages: [],
     fileChanges: [],
     commandExecutions: [],
+    tokenUsage: null,
     onProgress: options.onProgress ?? null
   };
 }
@@ -538,6 +539,11 @@ function applyTurnNotification(state, message) {
       state.error = message.params.error;
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
       break;
+    case "thread/tokenUsage/updated":
+      if ((message.params.threadId ?? null) === state.threadId) {
+        state.tokenUsage = message.params.tokenUsage ?? null;
+      }
+      break;
     case "turn/completed":
       if ((message.params.threadId ?? null) !== state.threadId) {
         state.activeSubagentTurns.delete(message.params.threadId);
@@ -587,9 +593,12 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     state.turnId = response.turn?.id ?? null;
     if (state.turnId) {
       state.threadTurnIds.set(state.threadId, state.turnId);
+      options.onTurnStarted?.({ threadId: state.threadId, turnId: state.turnId });
     }
     for (const message of state.bufferedNotifications) {
-      if (belongsToTurn(state, message)) {
+      // Mirror the live handler: thread metadata carries no top-level threadId, so it must not be
+      // filtered by turn ownership (dropping it here lost subagent names depending on timing).
+      if (message.method === "thread/started" || message.method === "thread/name/updated" || belongsToTurn(state, message)) {
         applyTurnNotification(state, message);
       } else {
         if (previousHandler) {
@@ -606,11 +615,15 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     return await state.completion;
   } finally {
     clearCompletionTimer(state);
+    options.onTurnFinished?.();
     client.setNotificationHandler(previousHandler ?? null);
   }
 }
 
-async function withAppServer(cwd, fn) {
+async function withAppServer(cwd, fn, options = {}) {
+  if (options.disableBroker) {
+    return withDirectAppServer(cwd, fn);
+  }
   let client = null;
   try {
     client = await CodexAppServerClient.connect(cwd);
@@ -1100,24 +1113,25 @@ export async function runAppServerTurn(cwd, options = {}) {
 
   return withAppServer(cwd, async (client) => {
     let threadId;
+    let threadResponse;
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
+      threadResponse = await resumeThread(client, options.resumeThreadId, cwd, {
         model: options.model,
         sandbox: options.sandbox,
         ephemeral: false
       });
-      threadId = response.thread.id;
+      threadId = threadResponse.thread.id;
     } else {
       emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
-      const response = await startThread(client, cwd, {
+      threadResponse = await startThread(client, cwd, {
         model: options.model,
         sandbox: options.sandbox,
         ephemeral: options.persistThread ? false : true,
         threadName: options.persistThread ? options.threadName : options.threadName ?? null
       });
-      threadId = response.thread.id;
+      threadId = threadResponse.thread.id;
     }
 
     emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
@@ -1129,19 +1143,21 @@ export async function runAppServerTurn(cwd, options = {}) {
       throw new Error("A prompt is required for this Codex run.");
     }
 
-    const turnState = await captureTurn(
-      client,
+    const turnParams = {
       threadId,
-      () =>
-        client.request("turn/start", {
-          threadId,
-          input: buildTurnInput(prompt),
-          model: options.model ?? null,
-          effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null
-        }),
-      { onProgress: options.onProgress }
-    );
+      input: buildTurnInput(prompt),
+      model: options.model ?? null,
+      effort: options.effort ?? null,
+      outputSchema: options.outputSchema ?? null
+    };
+    if (options.sandboxPolicy) {
+      turnParams.sandboxPolicy = options.sandboxPolicy;
+    }
+    const turnState = await captureTurn(client, threadId, () => client.request("turn/start", turnParams), {
+      onProgress: options.onProgress,
+      onTurnStarted: (turn) => options.controller?.attach({ client, ...turn }),
+      onTurnFinished: () => options.controller?.detach()
+    });
 
     return {
       status: buildResultStatus(turnState),
@@ -1154,10 +1170,27 @@ export async function runAppServerTurn(cwd, options = {}) {
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
-      commandExecutions: turnState.commandExecutions
+      commandExecutions: turnState.commandExecutions,
+      tokenUsage: turnState.tokenUsage,
+      subagentThreadCount: Math.max(0, turnState.threadIds.size - 1),
+      runtime: {
+        model: threadResponse?.model ?? options.model ?? null,
+        reasoningEffort: threadResponse?.reasoningEffort ?? options.effort ?? null
+      }
     };
-  });
+  }, { disableBroker: options.disableBroker });
 }
+
+/** Run `fn(client)` against a Codex app-server (shared broker when available unless `direct`). */
+export async function withCodexClient(cwd, fn, options = {}) {
+  const availability = getCodexAvailability(cwd);
+  if (!availability.available) {
+    throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
+  }
+  return withAppServer(cwd, fn, { disableBroker: Boolean(options.direct) });
+}
+
+export { buildTurnInput };
 
 export async function findLatestTaskThread(cwd) {
   const availability = getCodexAvailability(cwd);

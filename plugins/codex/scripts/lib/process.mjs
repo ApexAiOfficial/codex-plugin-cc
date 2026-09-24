@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import process from "node:process";
 
 export function runCommand(command, args = [], options = {}) {
@@ -48,6 +49,68 @@ export function binaryAvailable(command, versionArgs = ["--version"], options = 
     return { available: false, detail };
   }
   return { available: true, detail: result.stdout.trim() || result.stderr.trim() || "ok" };
+}
+
+export function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+/**
+ * A value that identifies one incarnation of `pid`, so a recycled pid is never mistaken for the
+ * process we launched. Returns null where no cheap marker exists (Windows) or the pid is gone.
+ */
+export function getProcessStartMarker(pid, options = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    return null;
+  }
+  if (platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      // Fields after the parenthesized command name; starttime is field 22 overall.
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      return fields[19] ? `linux:${fields[19]}` : null;
+    } catch {
+      return null;
+    }
+  }
+  const result = runCommand("ps", ["-o", "lstart=", "-p", String(pid)], { shell: false });
+  const started = result.status === 0 ? result.stdout.trim() : "";
+  return started ? `ps:${started}` : null;
+}
+
+/** True when `pid` is alive and, if a marker was recorded, still the same process incarnation. */
+export function isSameProcess(pid, marker, options = {}) {
+  if (!isProcessAlive(pid)) {
+    return false;
+  }
+  if (!marker) {
+    return true;
+  }
+  const current = getProcessStartMarker(pid, options);
+  return current == null ? true : current === marker;
+}
+
+/** Terminate a process tree only if it is still the incarnation we recorded. */
+export function terminateRecordedProcessTree(pid, marker, options = {}) {
+  if (!Number.isFinite(pid)) {
+    return { attempted: false, delivered: false, method: null, reason: "no-pid" };
+  }
+  if (!isSameProcess(pid, marker, options)) {
+    return { attempted: false, delivered: false, method: null, reason: "not-running-or-recycled" };
+  }
+  return terminateProcessTree(pid, options);
 }
 
 function looksLikeMissingProcessMessage(text) {

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -24,7 +23,9 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, terminateRecordedProcessTree } from "./lib/process.mjs";
+import { createJobController } from "./lib/control-channel.mjs";
+import { cancelControlledJob, resolveTicketJob, runTicketWorker, TICKET_COMMANDS } from "./lib/ticket-commands.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
@@ -48,7 +49,9 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  enqueueDetachedJob,
   nowIso,
+  reconcileActiveJobs,
   runTrackedJob,
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
@@ -68,7 +71,9 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+// The app-server protocol types reasoning effort as an open string, so accept any well-formed
+// token and let Codex reject values the selected model does not support.
+const REASONING_EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
@@ -83,7 +88,22 @@ function printUsage() {
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
-      "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
+      "  node scripts/codex-companion.mjs cancel [job-id|ticket] [--json]",
+      "",
+      "Delegated engineering tickets (durable, one Codex thread per ticket):",
+      "  delegate [--ticket <name>] [--role implement|investigate|review] [--isolation shared|worktree] [--owns <path|glob>]... [--interface <contract>]... [--accept <command>]... [--network] [--read-only] [--model <m>] [--effort <e>] [--title <t>] [--brief-file <path> | brief]",
+      "  followup <ticket> [--no-verification] [--brief-file <path> | feedback]",
+      "  steer <ticket> <message>",
+      "  wait [ticket|job-id]... [--timeout-ms <ms>]",
+      "  tickets [--all]",
+      "  show <ticket> [--turn <n>] [--commands | --command <n> | --prompt]",
+      "  verify <ticket> [--no-run] [--timeout-ms <ms>]",
+      "  integrate <ticket> [--allow-conflicts]",
+      "  close <ticket> --accepted|--rejected|--abandoned [--reason <text>] [--keep-worktree] [--purge] [--force]",
+      "  preflight [--network] [--read-only] [--check <command>]...",
+      "  watch [--interval-ms <ms>]",
+      "",
+      "All commands accept --cwd <path> and --json."
     ].join("\n")
   );
 }
@@ -119,9 +139,9 @@ function normalizeReasoningEffort(effort) {
   if (!normalized) {
     return null;
   }
-  if (!VALID_REASONING_EFFORTS.has(normalized)) {
+  if (!REASONING_EFFORT_PATTERN.test(normalized)) {
     throw new Error(
-      `Unsupported reasoning effort "${effort}". Use one of: none, minimal, low, medium, high, xhigh.`
+      `Unsupported reasoning effort "${effort}". Use a value such as none, minimal, low, medium, high, or xhigh.`
     );
   }
   return normalized;
@@ -214,7 +234,7 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "max-parallel"],
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
   });
 
@@ -232,6 +252,14 @@ async function handleSetup(argv) {
   } else if (options["disable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", false);
     actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+  }
+  if (options["max-parallel"] != null) {
+    const limit = Number(options["max-parallel"]);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 16) {
+      throw new Error("--max-parallel must be an integer between 1 and 16.");
+    }
+    setConfig(workspaceRoot, "maxParallelTickets", limit);
+    actionsTaken.push(`Set the concurrent Codex ticket limit to ${limit} for ${workspaceRoot}.`);
   }
 
   const finalReport = await buildSetupReport(cwd, actionsTaken);
@@ -308,6 +336,7 @@ function findLatestResumableTaskJob(jobs) {
     jobs.find(
       (job) =>
         job.jobClass === "task" &&
+        !job.ticketId &&
         job.threadId &&
         job.status !== "queued" &&
         job.status !== "running"
@@ -338,7 +367,9 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const sessionId = getCurrentClaudeSessionId();
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
-  const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
+  const activeTask = visibleJobs.find(
+    (job) => job.jobClass === "task" && !job.ticketId && (job.status === "queued" || job.status === "running")
+  );
   if (activeTask) {
     throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
   }
@@ -491,8 +522,11 @@ async function executeTaskRun(request) {
     sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
     persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
+    controller: request.controller ?? null,
+    disableBroker: Boolean(request.disableBroker)
   });
+  const interrupted = Boolean(request.controller?.interruptRequested) || result.turn?.status === "interrupted";
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
@@ -518,6 +552,7 @@ async function executeTaskRun(request) {
 
   return {
     exitStatus: result.status,
+    statusOverride: interrupted ? "cancelled" : undefined,
     threadId: result.threadId,
     turnId: result.turnId,
     payload,
@@ -668,34 +703,15 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
-  const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
-  return child;
-}
-
 function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
-  appendLogLine(logFile, "Queued for background execution.");
-
-  const child = spawnDetachedTaskWorker(cwd, job.id);
-  const queuedRecord = {
-    ...job,
-    status: "queued",
-    phase: "queued",
-    pid: child.pid ?? null,
-    logFile,
-    request
-  };
-  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  upsertJob(job.workspaceRoot, queuedRecord);
+  enqueueDetachedJob({
+    scriptPath: path.join(ROOT_DIR, "scripts", "codex-companion.mjs"),
+    cwd,
+    job,
+    request,
+    logFile
+  });
 
   return {
     payload: {
@@ -865,19 +881,40 @@ async function handleTaskWorker(argv) {
       logFile: storedJob.logFile ?? null
     }
   );
-  await runTrackedJob(
-    {
-      ...storedJob,
-      workspaceRoot,
-      logFile
-    },
-    () =>
-      executeTaskRun({
-        ...request,
-        onProgress: progress
-      }),
-    { logFile }
-  );
+
+  if (request.kind === "ticket-turn") {
+    await runTicketWorker({ ...storedJob, workspaceRoot }, companionContext(), { progress, logFile, runTrackedJob });
+    return;
+  }
+
+  // Detached workers own a private app-server and a control channel, so they survive the
+  // Claude session (whose broker is torn down at SessionEnd) and can be interrupted cleanly.
+  const controller = createJobController(workspaceRoot, storedJob.id, {
+    onEvent: ({ message, status, detail }) => progress?.(`Control ${message.type} ${status}${detail ? `: ${detail}` : ""}`)
+  });
+  try {
+    await runTrackedJob(
+      {
+        ...storedJob,
+        workspaceRoot,
+        logFile
+      },
+      () =>
+        executeTaskRun({
+          ...request,
+          controller,
+          disableBroker: true,
+          onProgress: progress
+        }),
+      { logFile }
+    );
+  } finally {
+    controller.finalize();
+  }
+}
+
+function companionContext() {
+  return { rootDir: ROOT_DIR, scriptPath: path.join(ROOT_DIR, "scripts", "codex-companion.mjs") };
 }
 
 async function handleStatus(argv) {
@@ -967,9 +1004,27 @@ async function handleCancel(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
-  const reference = positionals[0] ?? "";
+  const rawReference = positionals[0] ?? "";
+  const ticketJobId = rawReference ? resolveTicketJob(resolveWorkspaceRoot(cwd), rawReference) : null;
+  const reference = ticketJobId ?? rawReference;
+  reconcileActiveJobs(resolveWorkspaceRoot(cwd));
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+
+  if (existing.control || job.control) {
+    const outcome = await cancelControlledJob(workspaceRoot, { ...job, ...existing });
+    const nextJob = { ...job, status: "cancelled" };
+    const payload = {
+      jobId: job.id,
+      ticketId: existing.ticketId ?? null,
+      status: "cancelled",
+      title: job.title,
+      ...outcome
+    };
+    outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+    return;
+  }
+
   const threadId = existing.threadId ?? job.threadId ?? null;
   const turnId = existing.turnId ?? job.turnId ?? null;
 
@@ -983,7 +1038,7 @@ async function handleCancel(argv) {
     );
   }
 
-  terminateProcessTree(job.pid ?? Number.NaN);
+  terminateRecordedProcessTree(job.pid ?? Number.NaN, existing.pidMarker ?? job.pidMarker ?? null);
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();
@@ -1062,6 +1117,10 @@ async function main() {
       await handleCancel(argv);
       break;
     default:
+      if (Object.hasOwn(TICKET_COMMANDS, subcommand)) {
+        await TICKET_COMMANDS[subcommand](argv, companionContext());
+        break;
+      }
       throw new Error(`Unknown subcommand: ${subcommand}`);
   }
 }

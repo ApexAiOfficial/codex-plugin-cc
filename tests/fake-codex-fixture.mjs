@@ -247,6 +247,78 @@ function taskPayload(prompt, resume) {
   return "Handled the requested task.\\nTask prompt accepted.";
 }
 
+function parseWorkDirectives(prompt) {
+  const directives = { writes: [], runs: [], claims: [], blockers: [], status: "completed", slow: false };
+  for (const rawLine of prompt.split("\\n")) {
+    const line = rawLine.trim();
+    let match;
+    if ((match = /^FAKE_WRITE (\\S+) (.*)$/.exec(line))) {
+      directives.writes.push({ path: match[1], content: match[2].replace(/\\\\n/g, "\\n") });
+    } else if ((match = /^FAKE_RUN (-?\\d+) (.+)$/.exec(line))) {
+      directives.runs.push({ exitCode: Number(match[1]), command: match[2] });
+    } else if ((match = /^FAKE_CLAIM (passed|failed|not_run) (.+)$/.exec(line))) {
+      directives.claims.push({ outcome: match[1], command: match[2] });
+    } else if ((match = /^FAKE_BLOCKER (\\S+) (.+)$/.exec(line))) {
+      directives.blockers.push({ kind: match[1], detail: match[2], needed_from_lead: "Provide " + match[2] });
+    } else if ((match = /^FAKE_STATUS (\\S+)$/.exec(line))) {
+      directives.status = match[1];
+    } else if (line === "FAKE_SLOW") {
+      directives.slow = true;
+    } else if (line === "FAKE_TURN_FAIL") {
+      directives.turnFail = true;
+    }
+  }
+  return directives;
+}
+
+function runWorkTurn(state, thread, turnId, prompt) {
+  const directives = parseWorkDirectives(prompt);
+  const cwd = thread.cwd || process.cwd();
+  const items = [];
+  directives.writes.forEach((write, index) => {
+    const absolute = path.resolve(cwd, write.path);
+    const existed = fs.existsSync(absolute);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, write.content);
+    items.push({
+      completed: {
+        type: "fileChange",
+        id: "fc_" + turnId + "_" + index,
+        changes: [{ path: absolute, kind: existed ? { type: "update", move_path: null } : { type: "add" }, diff: "" }],
+        status: "completed"
+      }
+    });
+  });
+  directives.runs.forEach((run, index) => {
+    items.push({
+      completed: {
+        type: "commandExecution",
+        id: "cmd_" + turnId + "_" + index,
+        command: "/bin/bash -lc '" + run.command + "'",
+        cwd,
+        processId: null,
+        source: "agent",
+        status: run.exitCode === 0 ? "completed" : "failed",
+        commandActions: [],
+        aggregatedOutput: "output of " + run.command + "\\n",
+        exitCode: run.exitCode,
+        durationMs: 5
+      }
+    });
+  });
+  const buildReport = (steerText) => JSON.stringify({
+    status: directives.status,
+    summary: "Fake work turn changed " + directives.writes.length + " file(s)." + (steerText ? " Steered: " + steerText : ""),
+    changes: directives.writes.map((write) => ({ path: write.path, description: "wrote " + write.path })),
+    verification: directives.claims.map((claim) => ({ command: claim.command, outcome: claim.outcome, detail: "" })),
+    findings: [],
+    blockers: directives.blockers,
+    risks: [],
+    next_steps: []
+  });
+  return { items, directives, buildReport };
+}
+
 const args = process.argv.slice(2);
 if (args[0] === "--version") {
   console.log("codex-cli test");
@@ -346,8 +418,57 @@ rl.on("line", (line) => {
         }
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
+        if (message.params.cwd) {
+          thread.cwd = message.params.cwd;
+        }
         saveState(state);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        break;
+      }
+
+      case "command/exec": {
+        const argv = message.params.command || [];
+        state.commandExecs = (state.commandExecs || []).concat([{ command: argv, cwd: message.params.cwd || null, sandboxPolicy: message.params.sandboxPolicy || null }]);
+        saveState(state);
+        if (argv.includes("codex-preflight-probe")) {
+          const policy = message.params.sandboxPolicy || {};
+          send({
+            id: message.id,
+            result: {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                tools: { node: "v-fake", git: "git version fake", docker: BEHAVIOR === "sandbox-no-docker" ? "Docker fake" : null },
+                write: policy.type === "workspaceWrite",
+                gitWrite: false,
+                dockerDaemon: BEHAVIOR === "sandbox-no-docker" ? false : null,
+                network: Boolean(policy.networkAccess)
+              }),
+              stderr: ""
+            }
+          });
+          break;
+        }
+        const { spawnSync } = require("node:child_process");
+        const result = spawnSync(argv[0], argv.slice(1), { cwd: message.params.cwd || process.cwd(), encoding: "utf8" });
+        send({ id: message.id, result: { exitCode: result.status ?? 1, stdout: result.stdout || "", stderr: result.stderr || "" } });
+        break;
+      }
+
+      case "turn/steer": {
+        const pending = interruptibleTurns.get(message.params.expectedTurnId);
+        const text = (message.params.input || []).filter((item) => item.type === "text").map((item) => item.text).join("\\n");
+        state.lastSteer = { threadId: message.params.threadId, turnId: message.params.expectedTurnId, text };
+        saveState(state);
+        if (!pending) {
+          send({ id: message.id, error: { code: -32000, message: "no active turn to steer" } });
+          break;
+        }
+        send({ id: message.id, result: { turnId: message.params.expectedTurnId } });
+        if (pending.finish) {
+          clearTimeout(pending.timer);
+          interruptibleTurns.delete(message.params.expectedTurnId);
+          pending.finish(text);
+        }
         break;
       }
 
@@ -449,10 +570,41 @@ rl.on("line", (line) => {
 	          turnId,
 	          model: message.params.model ?? null,
 	          effort: message.params.effort ?? null,
+	          sandboxPolicy: message.params.sandboxPolicy ?? null,
+	          cwd: thread.cwd,
 	          prompt
 	        };
+	        state.turnStarts = (state.turnStarts || []).concat([{ threadId: message.params.threadId, turnId, cwd: thread.cwd, prompt }]);
 	        saveState(state);
 	        send({ id: message.id, result: { turn: buildTurn(turnId) } });
+
+        const outputProperties = message.params.outputSchema && message.params.outputSchema.properties;
+        if (outputProperties && outputProperties.blockers) {
+          const work = runWorkTurn(state, thread, turnId, prompt);
+          const complete = (steerText) => {
+            for (const entry of work.items) {
+              send({ method: "item/completed", params: { threadId: thread.id, turnId, item: entry.completed } });
+            }
+            send({ method: "thread/tokenUsage/updated", params: { threadId: thread.id, turnId, tokenUsage: { total: { totalTokens: 1234 }, last: { totalTokens: 1234 }, modelContextWindow: null } } });
+            if (work.directives.turnFail) {
+              send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "failed", { message: "usage limit reached", codexErrorInfo: "usageLimitExceeded", additionalDetails: null }) } });
+              return;
+            }
+            send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: work.buildReport(steerText), phase: "final_answer" } } });
+            send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+          };
+          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+          if (work.directives.slow) {
+            const timer = setTimeout(() => {
+              interruptibleTurns.delete(turnId);
+              complete(null);
+            }, 8000);
+            interruptibleTurns.set(turnId, { threadId: thread.id, timer, finish: complete });
+          } else {
+            complete(null);
+          }
+          break;
+        }
 
         const payload = message.params.outputSchema && message.params.outputSchema.properties && message.params.outputSchema.properties.verdict
           ? structuredReviewPayload(prompt)
