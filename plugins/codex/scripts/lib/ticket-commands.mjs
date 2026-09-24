@@ -254,7 +254,8 @@ function predictOwnershipOverlap(workspaceRoot, owns, ticketId) {
   const notes = [];
   const mine = owns.map(literalPrefix);
   for (const other of listTickets(workspaceRoot)) {
-    if (other.id === ticketId || !other.sandbox?.write) {
+    // Only implement tickets ever land changes; scratch investigations cannot collide.
+    if (other.id === ticketId || other.role !== "implement" || !other.sandbox?.write) {
       continue;
     }
     if (!owns.length || !other.owns?.length) {
@@ -484,7 +485,7 @@ async function handleDelegate(argv, ctx) {
     throw new Error(`Ticket "${ticketId}" already exists. Pick another name, or use followup to continue it.`);
   }
   const owns = splitList(options.owns);
-  const notes = write ? predictOwnershipOverlap(workspaceRoot, owns, ticketId) : [];
+  const notes = role === "implement" && write ? predictOwnershipOverlap(workspaceRoot, owns, ticketId) : [];
   if (options.network) {
     notes.push("Network access was granted to this ticket explicitly.");
   }
