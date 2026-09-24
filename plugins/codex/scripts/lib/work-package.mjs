@@ -13,12 +13,12 @@ const ROLE_CONTRACTS = {
     "Leave the working tree in a state the lead can integrate directly."
   ],
   investigate: [
-    "This is a read-only investigation: do not modify files.",
+    "This is an investigation, not an implementation: deliver an evidence-backed answer, not a patch. Only modify files if you are in a scratch worktree.",
     "Gather evidence by reading code, reproducing, and running targeted commands. Test competing hypotheses instead of settling on the first plausible one.",
     "Separate observed facts from inferences. Put conclusions in findings with concrete evidence and calibrated confidence, and recommend the next concrete step."
   ],
   review: [
-    "This is a read-only review: do not modify files.",
+    "This is a review, not an implementation: do not fix what you find. Only modify files (for experiments) if you are in a scratch worktree.",
     "Your job is to break confidence in the target, not to validate it. Look for violated invariants, unhandled failure paths, races, stale state, data loss, security and compatibility regressions, and wrong design assumptions.",
     "Report only material findings, each tied to a concrete location with evidence and honest confidence. If it looks sound, say so plainly with no findings."
   ]
@@ -35,7 +35,9 @@ function bulletList(items, fallback) {
 
 export function describeOwnership(ticket) {
   if (ticket.role !== "implement") {
-    return "Read-only package: you own no files.";
+    return ticket.isolation === "worktree"
+      ? "You are in a disposable scratch worktree created from the lead's current state. You may edit files, add instrumentation, and run anything the environment allows in order to reproduce and test hypotheses. Nothing here is integrated: report conclusions and evidence, and put any proposed fix in findings as a description or small diff."
+      : "Read-only package: you own no files.";
   }
   const lines = [];
   if (ticket.owns?.length) {
