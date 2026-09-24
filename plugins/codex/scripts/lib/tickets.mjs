@@ -28,6 +28,7 @@ export function deriveTicketId(text) {
     .replace(/<[^>]+>/g, " ")
     .replace(/[^a-z0-9\s-]/g, " ")
     .split(/\s+/)
+    .map((word) => word.replace(/^-+|-+$/g, ""))
     .filter((word) => word.length > 2 && !["the", "and", "for", "with", "that", "this", "from", "into"].includes(word))
     .slice(0, 4);
   const slug = words.join("-").slice(0, 36).replace(/-+$/, "") || "ticket";
@@ -35,7 +36,7 @@ export function deriveTicketId(text) {
 }
 
 export function validateTicketId(id) {
-  if (!TICKET_ID_PATTERN.test(id)) {
+  if (typeof id !== "string" || !TICKET_ID_PATTERN.test(id)) {
     throw new Error(`Invalid ticket name "${id}". Use 1-48 lowercase letters, digits, ".", "_" or "-", starting with a letter or digit.`);
   }
   return id;

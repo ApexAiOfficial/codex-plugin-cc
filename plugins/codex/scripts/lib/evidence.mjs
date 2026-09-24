@@ -205,17 +205,16 @@ export function crossCheckVerificationClaims(report, commands) {
       const matches = observed.filter(
         (command) => wanted && command.normalized && (command.normalized.includes(wanted) || wanted.includes(command.normalized))
       );
-      const last = matches.at(-1) ?? null;
-      let observation = "not-observed";
-      if (last) {
-        const passed = last.exitCode === 0;
-        observation = passed === (claim.outcome === "passed") ? "consistent" : "contradicted";
-      }
+      // A command is often run more than once (fail, fix, rerun), and each run may be reported as its
+      // own claim, so a claim is consistent when any matching run had the claimed outcome.
+      const wantPassed = claim.outcome === "passed";
+      const agreeing = matches.filter((command) => (command.exitCode === 0) === wantPassed);
+      const observation = matches.length === 0 ? "not-observed" : agreeing.length > 0 ? "consistent" : "contradicted";
       return {
         command: claim.command,
         claimed: claim.outcome,
         observation,
-        observedExitCode: last?.exitCode ?? null
+        observedExitCode: (agreeing.at(-1) ?? matches.at(-1))?.exitCode ?? null
       };
     });
 }

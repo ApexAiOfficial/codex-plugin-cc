@@ -763,6 +763,7 @@ async function handleShow(argv, ctx) {
     const lines = [
       `# Codex ticket ${ticket.id} — running turn ${ticket.turns?.length ?? "?"} (${job.phase ?? job.status}, ${elapsedBetween(job.startedAt ?? job.createdAt) ?? "?"})`,
       heartbeatAge == null ? "Heartbeat: none yet" : `Heartbeat: ${Math.round(heartbeatAge / 1000)}s ago${heartbeatAge > 90000 ? " (worker may be wedged)" : ""}`,
+      job.threadId ? `Codex thread: ${job.threadId} (watch live with \`codex resume ${job.threadId}\`)` : "Codex thread: not started yet",
       "Recent activity:",
       ...recent.map((line) => `- ${shorten(line, 160)}`),
       `Redirect: \`node ${companion} steer ${ticket.id} "…"\` · Stop: \`node ${companion} cancel ${ticket.id}\``
@@ -845,7 +846,8 @@ async function handleVerify(argv, ctx) {
   } else if (attributed.length > 0 && ticket.isolation !== "worktree") {
     problems.push(`A read-only ${ticket.role} ticket changed files: ${attributed.join(", ")}`);
   }
-  for (const claim of payload?.claims ?? []) {
+  // Recompute from the stored report and trace so verification never trusts a cached judgement.
+  for (const claim of crossCheckVerificationClaims(payload?.report ?? null, payload?.commands ?? [])) {
     if (claim.observation === "contradicted") {
       problems.push(`Codex claimed \`${claim.command}\` ${claim.claimed}, but the observed run exited ${claim.observedExitCode}.`);
     }
