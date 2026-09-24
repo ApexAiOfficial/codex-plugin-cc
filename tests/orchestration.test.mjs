@@ -492,3 +492,95 @@ test("watch emits one notification line per finished ticket turn", async (t) => 
   const ticket = readTicketRecord(ctx.repo, "after");
   assert.ok(JSON.parse(fs.readFileSync(resolveJobFile(ctx.repo, ticket.lastJobId), "utf8")).notifiedAt);
 });
+
+// ------------------------------------------------------------------------------------------
+// Regressions for defects found by the Codex review ticket (review-core)
+
+test("a lock whose owner is alive is never broken on age alone", async (t) => {
+  const { withFileLock } = await import("../plugins/codex/scripts/lib/locking.mjs");
+  const { getProcessStartMarker } = await import("../plugins/codex/scripts/lib/process.mjs");
+  const lockPath = path.join(makeTempDir(), "state.lock");
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => holder.kill("SIGKILL"));
+  await waitFor(() => getProcessStartMarker(holder.pid));
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: holder.pid, marker: getProcessStartMarker(holder.pid), token: "held" }));
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(lockPath, old, old);
+  assert.throws(() => withFileLock(lockPath, () => "entered", { timeoutMs: 300, staleMs: 50 }), /Timed out .*held by pid/);
+
+  // A recorded owner whose pid now belongs to a different process incarnation is stale.
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: holder.pid, marker: "linux:0-recycled", token: "old" }));
+  if (getProcessStartMarker(holder.pid)) {
+    assert.equal(withFileLock(lockPath, () => "entered", { timeoutMs: 300 }), "entered");
+  }
+});
+
+test("unverifiable process identity fails closed for kills and open for liveness", async (t) => {
+  const { probeProcessIdentity, terminateRecordedProcessTree } = await import("../plugins/codex/scripts/lib/process.mjs");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "codex-probe-hint"], { stdio: "ignore" });
+  t.after(() => child.kill("SIGKILL"));
+  await waitFor(() => fs.existsSync(`/proc/${child.pid}`) || process.platform !== "linux");
+  assert.equal(probeProcessIdentity(child.pid, null), "unknown");
+  assert.equal(terminateRecordedProcessTree(child.pid, null).attempted, false);
+  assert.equal(probeProcessIdentity(child.pid, null, { commandHint: "some-other-worker" }), process.platform === "linux" ? "different" : probeProcessIdentity(child.pid, null, { commandHint: "some-other-worker" }));
+  if (process.platform === "linux") {
+    assert.equal(probeProcessIdentity(child.pid, null, { commandHint: "codex-probe-hint" }), "same");
+  }
+
+  // Reconciliation must not declare a live worker lost just because identity is unverifiable.
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  fs.mkdirSync(path.join(stateDir, "jobs"), { recursive: true });
+  const job = { id: "task-unknown", status: "running", title: "Codex Task", jobClass: "task", pid: child.pid, createdAt: nowStamp(), updatedAt: nowStamp() };
+  fs.writeFileSync(path.join(stateDir, "jobs", "task-unknown.json"), JSON.stringify(job));
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({ version: 2, config: {}, jobs: [job] }));
+  assert.equal(companionJson(["status", "task-unknown"], { cwd: workspace }).job.status, "running");
+});
+
+function nowStamp(offsetMs = 0) {
+  return new Date(Date.now() + offsetMs).toISOString();
+}
+
+test("concurrent followups cannot launch two turns for one ticket", async () => {
+  const ctx = setupRepo();
+  delegateAndWait(ctx, ["--ticket", "race", "Work.\nFAKE_WRITE src/r.js 1"]);
+  const launch = () =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, [SCRIPT, "followup", "race", "Again.\nFAKE_SLOW", "--json"], { cwd: ctx.repo, env: ctx.env });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => (stdout += chunk));
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      child.on("exit", (code) => resolve({ code, stdout, stderr }));
+    });
+  const results = await Promise.all([launch(), launch(), launch()]);
+  const succeeded = results.filter((result) => result.code === 0);
+  assert.equal(succeeded.length, 1, JSON.stringify(results));
+  for (const failure of results.filter((result) => result.code !== 0)) {
+    assert.match(failure.stderr, /already has a running turn|is still running/);
+  }
+  const ticket = readTicketRecord(ctx.repo, "race");
+  assert.deepEqual(ticket.turns.map((turn) => turn.turn), [1, 2]);
+  companionJson(["cancel", "race"], { cwd: ctx.repo, env: ctx.env });
+});
+
+test("a ticket bound to a launch that never started is recovered as worker-lost", () => {
+  const ctx = setupRepo();
+  const stateDir = resolveStateDir(ctx.repo);
+  fs.mkdirSync(path.join(stateDir, "jobs"), { recursive: true });
+  fs.mkdirSync(path.join(stateDir, "tickets"), { recursive: true });
+  const old = nowStamp(-5 * 60 * 1000);
+  const job = { id: "ticket-stuck", status: "queued", kind: "ticket", jobClass: "task", ticketId: "stuck", pid: null, createdAt: old, updatedAt: old };
+  fs.writeFileSync(path.join(stateDir, "jobs", "ticket-stuck.json"), JSON.stringify(job));
+  fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({ version: 2, config: {}, jobs: [job] }));
+  const base = { version: 1, role: "implement", title: "Stuck", brief: "x", workdir: ctx.repo, isolation: "shared", sandbox: { write: true, network: false }, owns: [], acceptance: [], verifications: [], integrations: [], decisions: [], createdAt: old, updatedAt: old };
+  fs.writeFileSync(path.join(stateDir, "tickets", "stuck.json"), JSON.stringify({ ...base, id: "stuck", state: "running", activeJobId: "ticket-stuck", turns: [{ turn: 1, jobId: "ticket-stuck" }] }));
+  fs.writeFileSync(path.join(stateDir, "tickets", "orphan.json"), JSON.stringify({ ...base, id: "orphan", state: "running", activeJobId: "ticket-missing", turns: [{ turn: 1, jobId: "ticket-missing" }] }));
+
+  const tickets = companionJson(["tickets"], { cwd: ctx.repo, env: ctx.env }).tickets;
+  const byId = Object.fromEntries(tickets.map((ticket) => [ticket.id, ticket]));
+  assert.equal(byId.stuck.state, "needs-review");
+  assert.equal(byId.stuck.lastOutcome, "worker-lost");
+  assert.equal(byId.orphan.state, "needs-review");
+  assert.equal(byId.orphan.lastOutcome, "worker-lost");
+});

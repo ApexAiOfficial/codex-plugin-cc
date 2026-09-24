@@ -21,13 +21,15 @@ const DEFAULT_TOOLS = ["node", "npm", "pnpm", "yarn", "bun", "python3", "pip3", 
 const PROBE_SCRIPT = `
 const cp = require("child_process"), fs = require("fs"), path = require("path"), dns = require("dns");
 const tools = JSON.parse(process.argv[2] || "[]");
-const out = { tools: {}, write: null, gitWrite: null, dockerDaemon: null, network: null };
+const out = { tools: {}, write: null, gitWrite: null, dockerDaemon: null, network: null, syncSpawnReliable: null };
 const shell = process.platform === "win32";
 for (const tool of tools) {
   const r = cp.spawnSync(tool, ["--version"], { encoding: "utf8", timeout: 5000, shell });
   const text = String(r.stdout || r.stderr || "").trim();
   out.tools[tool] = r.status === 0 ? text.split(/\\r?\\n/)[0].slice(0, 80) || "available" : null;
 }
+const echo = cp.spawnSync(process.execPath, ["-e", "process.stdout.write('codex-probe-echo')"], { encoding: "utf8", timeout: 10000 });
+out.syncSpawnReliable = !echo.error && String(echo.stdout).includes("codex-probe-echo");
 function canWrite(dir) {
   const probe = path.join(dir, ".codex-preflight-" + process.pid);
   try { fs.writeFileSync(probe, "x"); fs.unlinkSync(probe); return true; } catch { return false; }
@@ -106,6 +108,11 @@ export function summarizeLimitations(host, sandbox, policy) {
   }
   if (host?.dockerDaemon && sandbox.dockerDaemon === false) {
     limitations.push("The Docker daemon is not reachable from the sandbox, so container-based tests and services cannot run there.");
+  }
+  if (host?.syncSpawnReliable && sandbox.syncSpawnReliable === false) {
+    limitations.push(
+      "Synchronous child processes are unreliable in the sandbox (spawnSync/execFileSync report EPERM and Node children lose stdout); tests that shell out synchronously can fail or misreport there, so the lead's verify is authoritative for them."
+    );
   }
   const missing = Object.entries(host?.tools ?? {})
     .filter(([tool, version]) => version && !sandbox.tools?.[tool])

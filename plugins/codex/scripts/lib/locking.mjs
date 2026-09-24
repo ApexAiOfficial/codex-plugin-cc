@@ -3,9 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
+import { getProcessStartMarker } from "./process.mjs";
+
 const DEFAULT_LOCK_TIMEOUT_MS = 15000;
-// No critical section guarded by these locks does more than read and rewrite a few small JSON
-// files, so a lock held this long belongs to a wedged or dead holder.
+// Only for a lock whose owner record is unreadable (the holder died between create and write).
+// A lock whose recorded owner is alive is never broken, however old: that would let two
+// writers run their critical sections concurrently.
 const DEFAULT_LOCK_STALE_MS = 30000;
 const SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
 const heldLocks = new Map();
@@ -42,10 +45,19 @@ function lockIsStale(lockPath, staleMs) {
     return false;
   }
   const owner = readLockOwner(lockPath);
-  if (owner && Number.isInteger(owner.pid) && owner.pid !== process.pid && !isPidAlive(owner.pid)) {
-    return true;
+  if (owner && Number.isInteger(owner.pid)) {
+    if (owner.pid === process.pid) {
+      // Held locks are tracked in-process; an unknown one with our pid is a recycled-pid leftover.
+      return !heldLocks.has(lockPath);
+    }
+    if (!isPidAlive(owner.pid)) {
+      return true;
+    }
+    // Alive: stale only if that pid now belongs to a different process incarnation.
+    const marker = owner.marker ? getProcessStartMarker(owner.pid) : null;
+    return Boolean(owner.marker && marker && marker !== owner.marker);
   }
-  // An unreadable owner usually means the holder is between create and write; only age decides.
+  // No readable owner: the holder is between create and write, or died there; only age decides.
   return Date.now() - stat.mtimeMs > staleMs;
 }
 
@@ -110,7 +122,10 @@ export function withFileLock(lockPath, fn, options = {}) {
   }
 
   try {
-    fs.writeSync(fd, JSON.stringify({ pid: process.pid, token, acquiredAt: new Date().toISOString() }));
+    fs.writeSync(
+      fd,
+      JSON.stringify({ pid: process.pid, marker: getProcessStartMarker(process.pid), token, acquiredAt: new Date().toISOString() })
+    );
   } catch (error) {
     fs.closeSync(fd);
     fs.rmSync(lockPath, { force: true });
