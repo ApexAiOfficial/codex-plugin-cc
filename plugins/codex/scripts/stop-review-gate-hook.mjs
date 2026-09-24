@@ -10,6 +10,7 @@ import { getCodexAvailability } from "./lib/codex.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { getConfig, listJobs } from "./lib/state.mjs";
 import { sortJobsNewestFirst } from "./lib/job-control.mjs";
+import { findUnsurfacedTicketTurns, markTicketTurnsNudged } from "./lib/ticket-commands.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -139,11 +140,44 @@ function runStopReview(cwd, input = {}) {
   }
 }
 
+function buildTicketNudge(workspaceRoot, input) {
+  // Never re-block a stop that is already a continuation caused by a stop hook.
+  if (input.stop_hook_active) {
+    return null;
+  }
+  const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
+  let pending = [];
+  try {
+    pending = findUnsurfacedTicketTurns(workspaceRoot, sessionId);
+  } catch {
+    return null;
+  }
+  if (pending.length === 0) {
+    return null;
+  }
+  markTicketTurnsNudged(workspaceRoot, pending);
+  const companion = path.join(SCRIPT_DIR, "codex-companion.mjs");
+  const lines = pending.map(
+    ({ ticket }) => `- ${ticket.id}: ${ticket.lastOutcome}${ticket.lastSummary ? ` — ${String(ticket.lastSummary).slice(0, 160)}` : ""}`
+  );
+  return [
+    "Delegated Codex work finished and has not been reviewed yet:",
+    ...lines,
+    `Look at it before finishing (\`node "${companion}" show <ticket>\`): verify and integrate it if it belongs to the current task, or briefly tell the user it is waiting. This reminder is shown once per turn.`
+  ].join("\n");
+}
+
 function main() {
   const input = readHookInput();
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
+
+  const nudge = buildTicketNudge(workspaceRoot, input);
+  if (nudge) {
+    emitDecision({ decision: "block", reason: nudge });
+    return;
+  }
 
   const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), input));
   const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");

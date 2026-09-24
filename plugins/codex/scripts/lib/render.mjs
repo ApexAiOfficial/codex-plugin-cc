@@ -331,6 +331,18 @@ export function renderStatusReport(report) {
     ""
   ];
 
+  if (report.tickets?.length > 0) {
+    lines.push("Open tickets:");
+    lines.push("| Ticket | State | Last outcome | Role | Summary |");
+    lines.push("| --- | --- | --- | --- | --- |");
+    for (const ticket of report.tickets) {
+      lines.push(
+        `| ${escapeMarkdownCell(ticket.id)} | ${escapeMarkdownCell(ticket.state)} | ${escapeMarkdownCell(ticket.lastOutcome ?? "")} | ${escapeMarkdownCell(ticket.role)} | ${escapeMarkdownCell(ticket.lastSummary ?? ticket.title ?? "")} |`
+      );
+    }
+    lines.push("");
+  }
+
   if (report.running.length > 0) {
     appendActiveJobsTable(lines, report.running);
     lines.push("");

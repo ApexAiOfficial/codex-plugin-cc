@@ -2,7 +2,8 @@ import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
-import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
+import { listTickets } from "./tickets.mjs";
+import { reconcileActiveJobs, SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
@@ -212,6 +213,7 @@ function matchJobReference(jobs, reference, predicate = () => true) {
 
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  reconcileActiveJobs(workspaceRoot);
   const config = getConfig(workspaceRoot);
   const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
@@ -235,12 +237,14 @@ export function buildStatusSnapshot(cwd, options = {}) {
     running,
     latestFinished,
     recent,
+    tickets: listTickets(workspaceRoot),
     needsReview: Boolean(config.stopReviewGate)
   };
 }
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  reconcileActiveJobs(workspaceRoot);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const selected = matchJobReference(jobs, reference);
   if (!selected) {

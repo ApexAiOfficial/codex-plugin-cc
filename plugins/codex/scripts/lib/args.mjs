@@ -1,10 +1,18 @@
 export function parseArgs(argv, config = {}) {
-  const valueOptions = new Set(config.valueOptions ?? []);
+  const multiValueOptions = new Set(config.multiValueOptions ?? []);
+  const valueOptions = new Set([...(config.valueOptions ?? []), ...multiValueOptions]);
   const booleanOptions = new Set(config.booleanOptions ?? []);
   const aliasMap = config.aliasMap ?? {};
   const options = {};
   const positionals = [];
   let passthrough = false;
+  const assignValue = (key, value) => {
+    if (multiValueOptions.has(key)) {
+      options[key] = [...(options[key] ?? []), value];
+    } else {
+      options[key] = value;
+    }
+  };
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -38,7 +46,7 @@ export function parseArgs(argv, config = {}) {
         if (nextValue === undefined) {
           throw new Error(`Missing value for --${rawKey}`);
         }
-        options[key] = nextValue;
+        assignValue(key, nextValue);
         if (inlineValue === undefined) {
           index += 1;
         }
@@ -62,7 +70,7 @@ export function parseArgs(argv, config = {}) {
       if (nextValue === undefined) {
         throw new Error(`Missing value for -${shortKey}`);
       }
-      options[key] = nextValue;
+      assignValue(key, nextValue);
       index += 1;
       continue;
     }

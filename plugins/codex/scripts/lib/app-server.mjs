@@ -37,7 +37,9 @@ const DEFAULT_CAPABILITIES = {
     "item/agentMessage/delta",
     "item/reasoning/summaryTextDelta",
     "item/reasoning/summaryPartAdded",
-    "item/reasoning/textDelta"
+    "item/reasoning/textDelta",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta"
   ]
 };
 
