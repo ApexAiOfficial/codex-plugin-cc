@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import process from "node:process";
 
-import { getProcessStartMarker, isSameProcess } from "./process.mjs";
+import { getProcessStartMarker, probeProcessIdentity } from "./process.mjs";
 import {
   ACTIVE_JOB_STATUSES,
   listJobs,
@@ -19,6 +19,17 @@ import {
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const HEARTBEAT_INTERVAL_MS = 15000;
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+// A queued job with no worker pid after this long means the launch never completed.
+export const LAUNCH_GRACE_MS = 60000;
+
+/** Command-line fragment that identifies a worker where start markers are unavailable. */
+export function workerCommandHint(jobId) {
+  return `--job-id ${jobId}`;
+}
+
+function currentProcessCommandHint(jobId) {
+  return process.argv.includes("--job-id") ? workerCommandHint(jobId) : "codex-companion.mjs";
+}
 
 /** The index holds lightweight metadata only; prompts and results stay in the job file. */
 function indexRecord(record) {
@@ -176,26 +187,15 @@ export function readJobHeartbeatAgeMs(workspaceRoot, jobId) {
   }
 }
 
-/**
- * Launch `task-worker` as a detached process that outlives this command and the Claude session.
- * The worker talks to its own app-server, so nothing session-scoped can take it down.
- */
-export function enqueueDetachedJob({ scriptPath, cwd, job, request, logFile }) {
-  appendLogLine(logFile, "Queued for background execution.");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", job.id], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
+/** Persist a queued job (no worker yet). Call inside withStateLock to bind it atomically. */
+export function writeQueuedJob({ job, request, logFile }) {
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
-    pidMarker: getProcessStartMarker(child.pid ?? null),
+    pid: null,
+    pidMarker: null,
+    pidCommandHint: workerCommandHint(job.id),
     control: true,
     logFile,
     request
@@ -204,7 +204,42 @@ export function enqueueDetachedJob({ scriptPath, cwd, job, request, logFile }) {
     writeJobFile(job.workspaceRoot, job.id, queuedRecord);
     upsertJob(job.workspaceRoot, indexRecord(queuedRecord));
   });
+  appendLogLine(logFile, "Queued for background execution.");
   return queuedRecord;
+}
+
+/**
+ * Launch `task-worker` for an already-queued job as a detached process that outlives this
+ * command and the Claude session (it talks to its own app-server, not the session broker).
+ */
+export function spawnDetachedWorker({ scriptPath, cwd, job }) {
+  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", job.id], {
+    cwd,
+    env: process.env,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
+  const pid = child.pid ?? null;
+  const pidMarker = getProcessStartMarker(pid);
+  withStateLock(job.workspaceRoot, () => {
+    // The worker may already have recorded itself as running; never regress that record.
+    updateJobFile(job.workspaceRoot, job.id, (stored) =>
+      stored && stored.status === "queued" && stored.pid == null ? { ...stored, pid, pidMarker } : null
+    );
+    const stored = readStoredJobOrNull(job.workspaceRoot, job.id);
+    if (stored?.status === "queued") {
+      upsertJob(job.workspaceRoot, { id: job.id, pid, pidMarker });
+    }
+  });
+  return child;
+}
+
+export function enqueueDetachedJob({ scriptPath, cwd, job, request, logFile }) {
+  const queued = writeQueuedJob({ job, request, logFile });
+  spawnDetachedWorker({ scriptPath, cwd, job });
+  return queued;
 }
 
 export async function runTrackedJob(job, runner, options = {}) {
@@ -215,6 +250,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     phase: "starting",
     pid: process.pid,
     pidMarker: getProcessStartMarker(process.pid),
+    pidCommandHint: currentProcessCommandHint(job.id),
     logFile: options.logFile ?? job.logFile ?? null
   };
   withStateLock(job.workspaceRoot, () => {
@@ -291,10 +327,18 @@ export async function runTrackedJob(job, runner, options = {}) {
  * recording a result (crash, OOM, reboot, killed shell) is marked failed with failureKind
  * "worker-lost" instead of staying "running" forever. Returns the ids that were reconciled.
  */
+function isWorkerDead(job) {
+  if (!Number.isInteger(job.pid)) {
+    // A queued job whose worker never recorded a pid: the launch did not complete.
+    return job.status === "queued" && Date.now() - Date.parse(job.createdAt ?? job.updatedAt ?? "") > LAUNCH_GRACE_MS;
+  }
+  // Fail open: only a process that is gone or provably different counts as dead.
+  const identity = probeProcessIdentity(job.pid, job.pidMarker, { commandHint: job.pidCommandHint });
+  return identity === "gone" || identity === "different";
+}
+
 export function reconcileActiveJobs(workspaceRoot) {
-  const candidates = listJobs(workspaceRoot).filter(
-    (job) => ACTIVE_JOB_STATUSES.has(job.status) && Number.isInteger(job.pid) && !isSameProcess(job.pid, job.pidMarker)
-  );
+  const candidates = listJobs(workspaceRoot).filter((job) => ACTIVE_JOB_STATUSES.has(job.status) && isWorkerDead(job));
   if (candidates.length === 0) {
     return [];
   }
@@ -304,7 +348,7 @@ export function reconcileActiveJobs(workspaceRoot) {
     const fresh = new Map(listJobs(workspaceRoot).map((job) => [job.id, job]));
     for (const candidate of candidates) {
       const job = fresh.get(candidate.id);
-      if (!job || !ACTIVE_JOB_STATUSES.has(job.status) || isSameProcess(job.pid, job.pidMarker)) {
+      if (!job || !ACTIVE_JOB_STATUSES.has(job.status) || !isWorkerDead(job)) {
         continue;
       }
       const stored = readStoredJobOrNull(workspaceRoot, job.id);

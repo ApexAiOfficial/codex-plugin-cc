@@ -17,6 +17,7 @@ import {
 } from "./evidence.mjs";
 import { readStdinIfPiped } from "./fs.mjs";
 import { ensureGitRepository } from "./git.mjs";
+import { withFileLock } from "./locking.mjs";
 import { terminateRecordedProcessTree } from "./process.mjs";
 import {
   ACTIVE_JOB_STATUSES,
@@ -25,6 +26,7 @@ import {
   readJobFile,
   resolveJobArtifactPath,
   resolveJobFile,
+  resolveTicketsDir,
   resolveWorktreesDir,
   updateJobFile,
   upsertJob,
@@ -45,12 +47,14 @@ import {
   appendLogLine,
   createJobLogFile,
   createJobRecord,
-  enqueueDetachedJob,
+  LAUNCH_GRACE_MS,
   nowIso,
   readJobHeartbeatAgeMs,
   reconcileActiveJobs,
   SESSION_ID_ENV,
-  startJobHeartbeat
+  spawnDetachedWorker,
+  startJobHeartbeat,
+  writeQueuedJob
 } from "./tracked-jobs.mjs";
 import {
   buildFollowupPrompt,
@@ -202,16 +206,37 @@ function finalizeTicketTurn(workspaceRoot, ticketId, job) {
   });
 }
 
-/** Bring a ticket in line with its active job (worker finished or died). */
+function lostLaunchJob(jobId) {
+  return {
+    id: jobId,
+    status: "failed",
+    failureKind: "worker-lost",
+    errorMessage: "The turn never started: its launch did not complete.",
+    completedAt: nowIso(),
+    result: null
+  };
+}
+
+/** Bring a ticket in line with its active job (worker finished, died, or never launched). */
 export function syncTicket(workspaceRoot, ticket) {
-  if (!ticket || ticket.state !== "running" || !ticket.activeJobId) {
+  if (!ticket || ticket.state !== "running") {
     return ticket;
   }
-  const job = readStoredJob(workspaceRoot, ticket.activeJobId);
-  if (!job || ACTIVE_JOB_STATUSES.has(job.status)) {
+  const launchAbandoned = Date.now() - Date.parse(ticket.updatedAt ?? "") > LAUNCH_GRACE_MS;
+  const job = ticket.activeJobId ? readStoredJob(workspaceRoot, ticket.activeJobId) : null;
+  if (!job) {
+    // Defensive: launches persist the job before binding it, but never leave a ticket stuck.
+    return launchAbandoned ? finalizeTicketTurn(workspaceRoot, ticket.id, lostLaunchJob(ticket.activeJobId ?? null)) : ticket;
+  }
+  if (ACTIVE_JOB_STATUSES.has(job.status)) {
     return ticket;
   }
   return finalizeTicketTurn(workspaceRoot, ticket.id, job);
+}
+
+/** Serialize operations that change a ticket's workspace (followup, integrate, close). */
+function withTicketOperationLock(workspaceRoot, ticketId, fn) {
+  return withFileLock(path.join(resolveTicketsDir(workspaceRoot), `${ticketId}.op.lock`), fn);
 }
 
 export function reconcileWorkspace(workspaceRoot) {
@@ -219,28 +244,73 @@ export function reconcileWorkspace(workspaceRoot) {
   return listTickets(workspaceRoot).map((ticket) => syncTicket(workspaceRoot, ticket));
 }
 
-function launchTicketTurn(workspaceRoot, ticket, { turn, feedback = null, attachVerification = false, model = null, effort = null }, ctx) {
-  const job = createJobRecord({
-    id: generateJobId("ticket"),
-    kind: "ticket",
-    kindLabel: "ticket",
-    title: `Codex ticket ${ticket.id}`,
-    workspaceRoot,
-    jobClass: "task",
-    summary: shorten(turn === 1 ? ticket.title : feedback || "Continue the package", 96),
-    write: ticket.sandbox.write,
-    ticketId: ticket.id
+/**
+ * Start a ticket turn as one locked transaction: re-read the ticket, refuse if a turn is already
+ * active, choose the turn number, persist the queued job, then bind it to the ticket. The job is
+ * written first, so a crash leaves either nothing bound or a queued job that reconciliation
+ * recovers. `create` makes the ticket itself inside the same transaction.
+ */
+function launchTicketTurn(workspaceRoot, ticketId, { feedback = null, attachVerification = false, model = null, effort = null, create = null }, ctx) {
+  const jobId = generateJobId("ticket");
+  const title = `Codex ticket ${ticketId}`;
+  const logFile = createJobLogFile(workspaceRoot, jobId, title);
+  let job;
+  let ticket;
+  withStateLock(workspaceRoot, () => {
+    const current = create ? null : readTicket(workspaceRoot, ticketId);
+    if (create && readTicket(workspaceRoot, ticketId)) {
+      throw new Error(`Ticket "${ticketId}" already exists. Pick another name, or use followup to continue it.`);
+    }
+    if (!create) {
+      if (!current) {
+        throw new Error(`No ticket named "${ticketId}".`);
+      }
+      if (!isTicketOpen(current)) {
+        throw new Error(`Ticket ${ticketId} is ${current.state}; open a new ticket instead.`);
+      }
+      if (current.state === "running" || current.activeJobId) {
+        throw new Error(`Ticket ${ticketId} already has a running turn. Redirect it with \`steer ${ticketId} "…"\` or wait for it.`);
+      }
+    }
+    const base = create ?? current;
+    const turn = (base.turns?.length ?? 0) + 1;
+    job = createJobRecord({
+      id: jobId,
+      kind: "ticket",
+      kindLabel: "ticket",
+      title,
+      workspaceRoot,
+      jobClass: "task",
+      summary: shorten(turn === 1 ? base.title : feedback || "Continue the package", 96),
+      write: base.sandbox.write,
+      ticketId
+    });
+    const request = { kind: "ticket-turn", ticketId, workspaceRoot, turn, feedback, attachVerification, model, effort };
+    writeQueuedJob({ job, request, logFile });
+    const turnEntry = { turn, jobId, startedAt: nowIso(), feedback: feedback ? shorten(feedback, 300) : null };
+    if (create) {
+      ticket = createTicket(workspaceRoot, { ...create, state: "running", activeJobId: jobId, turns: [turnEntry] });
+    } else {
+      ticket = updateTicket(workspaceRoot, ticketId, (record) => {
+        record.state = "running";
+        record.activeJobId = jobId;
+        record.turns.push(turnEntry);
+      });
+    }
   });
-  const logFile = createJobLogFile(workspaceRoot, job.id, job.title);
-  const request = { kind: "ticket-turn", ticketId: ticket.id, workspaceRoot, turn, feedback, attachVerification, model, effort };
-  // Register the turn before the worker exists so a fast worker can never finish first.
-  const updated = updateTicket(workspaceRoot, ticket.id, (record) => {
-    record.state = "running";
-    record.activeJobId = job.id;
-    record.turns.push({ turn, jobId: job.id, startedAt: nowIso(), feedback: feedback ? shorten(feedback, 300) : null });
-  });
-  enqueueDetachedJob({ scriptPath: ctx.scriptPath, cwd: workspaceRoot, job, request, logFile });
-  return { job, ticket: updated };
+
+  try {
+    spawnDetachedWorker({ scriptPath: ctx.scriptPath, cwd: workspaceRoot, job });
+  } catch (error) {
+    withStateLock(workspaceRoot, () => {
+      const failed = { ...(readStoredJob(workspaceRoot, jobId) ?? job), ...lostLaunchJob(jobId), errorMessage: `Could not start the worker: ${error.message}` };
+      writeJobFile(workspaceRoot, jobId, failed);
+      upsertJob(workspaceRoot, { id: jobId, status: "failed", phase: "failed", failureKind: "worker-lost", errorMessage: failed.errorMessage, completedAt: failed.completedAt });
+    });
+    syncTicket(workspaceRoot, { ...readTicket(workspaceRoot, ticketId), updatedAt: new Date(0).toISOString() });
+    throw error;
+  }
+  return { job, ticket };
 }
 
 function literalPrefix(pattern) {
@@ -497,9 +567,9 @@ async function handleDelegate(argv, ctx) {
     workdir = worktree.path;
   }
 
-  let ticket;
+  let launched;
   try {
-    ticket = createTicket(workspaceRoot, {
+    launched = launchTicketTurn(workspaceRoot, ticketId, { create: {
       id: ticketId,
       title: options.title ?? shorten(firstLine(brief), 90),
       role,
@@ -515,16 +585,14 @@ async function handleDelegate(argv, ctx) {
       acceptanceNotes: options["acceptance-notes"] ?? null,
       model: options.model ?? null,
       effort: options.effort ?? null,
-      state: "running",
       createdBySession: process.env[SESSION_ID_ENV] ?? null,
       threadId: null,
-      activeJobId: null,
       lastJobId: null,
       turns: [],
       verifications: [],
       integrations: [],
       decisions: []
-    });
+    } }, ctx);
   } catch (error) {
     if (worktree) {
       removeTicketWorktree({ repoRoot: workspaceRoot, worktree, ticketId, worktreesRoot: resolveWorktreesDir(workspaceRoot) });
@@ -532,7 +600,7 @@ async function handleDelegate(argv, ctx) {
     throw error;
   }
 
-  const launched = launchTicketTurn(workspaceRoot, ticket, { turn: 1 }, ctx);
+  const ticket = launched.ticket;
   const payload = {
     ticketId,
     jobId: launched.job.id,
@@ -566,13 +634,15 @@ async function handleFollowup(argv, ctx) {
     ? fs.readFileSync(path.resolve(cwd, options["brief-file"]), "utf8")
     : positionals.slice(1).join(" ") || readStdinIfPiped();
   const attachVerification = !options["no-verification"] && Boolean(latestFailingVerification(ticket));
-  const turn = (ticket.turns?.length ?? 0) + 1;
-  const launched = launchTicketTurn(
-    workspaceRoot,
-    ticket,
-    { turn, feedback: feedback?.trim() || null, attachVerification, model: options.model ?? null, effort: options.effort ?? null },
-    ctx
+  const launched = withTicketOperationLock(workspaceRoot, ticket.id, () =>
+    launchTicketTurn(
+      workspaceRoot,
+      ticket.id,
+      { feedback: feedback?.trim() || null, attachVerification, model: options.model ?? null, effort: options.effort ?? null },
+      ctx
+    )
   );
+  const turn = launched.ticket.turns.length;
   const notes = [];
   if (attachVerification) {
     notes.push("The failing output from your last verify run is attached to this turn.");
@@ -883,7 +953,11 @@ async function handleVerify(argv, ctx) {
 async function handleIntegrate(argv, ctx) {
   const { options, positionals } = parse(argv, { valueOptions: ["cwd"], booleanOptions: ["json", "allow-conflicts"] });
   const workspaceRoot = resolveWorkspaceRoot(resolveCwd(options));
-  const ticket = requireTicket(workspaceRoot, positionals[0]);
+  const reference = requireTicket(workspaceRoot, positionals[0]);
+  withTicketOperationLock(workspaceRoot, reference.id, () => integrateTicket(workspaceRoot, readTicket(workspaceRoot, reference.id), options, ctx));
+}
+
+function integrateTicket(workspaceRoot, ticket, options, ctx) {
   if (ticket.isolation !== "worktree" || !ticket.worktree) {
     throw new Error(`Ticket ${ticket.id} worked directly in your checkout; there is nothing to integrate.`);
   }
@@ -933,7 +1007,13 @@ async function handleClose(argv, ctx) {
     booleanOptions: ["json", "accepted", "rejected", "abandoned", "purge", "keep-worktree", "force"]
   });
   const workspaceRoot = resolveWorkspaceRoot(resolveCwd(options));
-  const ticket = requireTicket(workspaceRoot, positionals[0]);
+  const reference = requireTicket(workspaceRoot, positionals[0]);
+  withTicketOperationLock(workspaceRoot, reference.id, () =>
+    closeTicket(workspaceRoot, syncTicket(workspaceRoot, readTicket(workspaceRoot, reference.id)), options)
+  );
+}
+
+function closeTicket(workspaceRoot, ticket, options) {
   const decisions = ["accepted", "rejected", "abandoned"].filter((decision) => options[decision]);
   const worktreesRoot = resolveWorktreesDir(workspaceRoot);
 
@@ -1063,7 +1143,7 @@ export async function cancelControlledJob(workspaceRoot, job, { timeoutMs = GRAC
   let terminated = null;
   if (isActive()) {
     const stored = readStoredJob(workspaceRoot, job.id) ?? job;
-    terminated = terminateRecordedProcessTree(stored.pid ?? Number.NaN, stored.pidMarker ?? null);
+    terminated = terminateRecordedProcessTree(stored.pid ?? Number.NaN, stored.pidMarker ?? null, { commandHint: stored.pidCommandHint ?? null });
     withStateLock(workspaceRoot, () => {
       const current = readStoredJob(workspaceRoot, job.id) ?? stored;
       if (ACTIVE_JOB_STATUSES.has(current.status)) {

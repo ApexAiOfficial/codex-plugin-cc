@@ -1038,7 +1038,12 @@ async function handleCancel(argv) {
     );
   }
 
-  terminateRecordedProcessTree(job.pid ?? Number.NaN, existing.pidMarker ?? job.pidMarker ?? null);
+  const termination = terminateRecordedProcessTree(job.pid ?? Number.NaN, existing.pidMarker ?? job.pidMarker ?? null, {
+    commandHint: existing.pidCommandHint ?? job.pidCommandHint ?? null
+  });
+  if (!termination.attempted && termination.reason?.startsWith("identity-")) {
+    appendLogLine(job.logFile, `Did not signal pid ${job.pid}: its identity could not be verified (${termination.reason}).`);
+  }
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();

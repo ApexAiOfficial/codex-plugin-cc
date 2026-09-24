@@ -37,7 +37,7 @@ Your final message must be JSON matching the provided schema, written for the le
 - status: "completed" only if the objective is met and verified as far as the environment allows; "partial" if meaningful required work remains; "blocked" if a blocker prevents completion; "failed" if the approach did not work.
 - summary: two or three sentences stating what is now true, not a narrative of steps.
 - changes: every file you changed, with a one-line description each.
-- verification: each check you ran (command, outcome, one-line detail), plus required checks you could not run as "not_run" with the reason.
+- verification: each check you ran, with `command` set to the exact command line you executed (the lead cross-checks it against the observed command log), its outcome, and a one-line detail; plus required checks you could not run as "not_run" with the reason. Describe ad-hoc experiments and scripts under findings, not here.
 - findings: observations with concrete evidence (file:line, command output) and honest confidence; use for investigation and review results, and for anything the lead should know.
 - risks and next_steps: short, concrete, and only when they matter.
 </final_report>

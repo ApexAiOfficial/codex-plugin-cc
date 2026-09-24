@@ -90,25 +90,67 @@ export function getProcessStartMarker(pid, options = {}) {
   return started ? `ps:${started}` : null;
 }
 
-/** True when `pid` is alive and, if a marker was recorded, still the same process incarnation. */
-export function isSameProcess(pid, marker, options = {}) {
-  if (!isProcessAlive(pid)) {
-    return false;
+/** Command line of a live process, or null when it cannot be read on this platform. */
+export function readProcessCommandLine(pid, options = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
   }
-  if (!marker) {
-    return true;
+  const platform = options.platform ?? process.platform;
+  if (platform === "linux") {
+    try {
+      return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ") || null;
+    } catch {
+      return null;
+    }
   }
-  const current = getProcessStartMarker(pid, options);
-  return current == null ? true : current === marker;
+  const result =
+    platform === "win32"
+      ? runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], { shell: false })
+      : runCommand("ps", ["-o", "command=", "-p", String(pid)], { shell: false });
+  const text = result.status === 0 ? result.stdout.trim() : "";
+  return text || null;
 }
 
-/** Terminate a process tree only if it is still the incarnation we recorded. */
+/**
+ * Identify a recorded process: "gone" (not running), "same" (verified to be the process we
+ * recorded), "different" (the pid now belongs to another process), or "unknown" (alive, but
+ * identity cannot be verified). Verification uses the start marker when one was recorded and
+ * otherwise a command-line hint (for platforms without markers, such as Windows).
+ */
+export function probeProcessIdentity(pid, marker, options = {}) {
+  if (!isProcessAlive(pid)) {
+    return "gone";
+  }
+  if (marker) {
+    const current = getProcessStartMarker(pid, options);
+    if (current == null) {
+      return "unknown";
+    }
+    return current === marker ? "same" : "different";
+  }
+  if (options.commandHint) {
+    const commandLine = readProcessCommandLine(pid, options);
+    if (commandLine == null) {
+      return "unknown";
+    }
+    return commandLine.includes(options.commandHint) ? "same" : "different";
+  }
+  return "unknown";
+}
+
+/** Kill-safety check: true only when the process is verified to be the one we recorded. */
+export function isSameProcess(pid, marker, options = {}) {
+  return probeProcessIdentity(pid, marker, options) === "same";
+}
+
+/** Terminate a process tree only when it is verified to be the incarnation we recorded (fail closed). */
 export function terminateRecordedProcessTree(pid, marker, options = {}) {
   if (!Number.isFinite(pid)) {
     return { attempted: false, delivered: false, method: null, reason: "no-pid" };
   }
-  if (!isSameProcess(pid, marker, options)) {
-    return { attempted: false, delivered: false, method: null, reason: "not-running-or-recycled" };
+  const identity = probeProcessIdentity(pid, marker, options);
+  if (identity !== "same") {
+    return { attempted: false, delivered: false, method: null, reason: identity === "gone" ? "not-running" : `identity-${identity}` };
   }
   return terminateProcessTree(pid, options);
 }

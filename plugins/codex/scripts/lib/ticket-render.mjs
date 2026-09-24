@@ -161,12 +161,13 @@ export function renderTurnCard(ticket, job, payload, { companion }) {
     }
   }
 
-  for (const claim of payload?.claims ?? []) {
-    if (claim.observation !== "consistent") {
-      lines.push(
-        `Claim check: \`${shorten(claim.command, 80)}\` reported ${claim.claimed} but ${claim.observation === "contradicted" ? `observed exit ${claim.observedExitCode}` : "no matching command was observed"}.`
-      );
-    }
+  const claims = payload?.claims ?? [];
+  for (const claim of claims.filter((entry) => entry.observation === "contradicted")) {
+    lines.push(`CLAIM CONTRADICTED: \`${shorten(claim.command, 80)}\` reported ${claim.claimed}, but the observed run exited ${claim.observedExitCode}.`);
+  }
+  const unobserved = claims.filter((entry) => entry.observation === "not-observed");
+  if (unobserved.length) {
+    lines.push(`Claim check: ${unobserved.length} reported check(s) had no matching command in the observed log (${unobserved.map((entry) => `\`${shorten(entry.command, 40)}\``).join(", ")}).`);
   }
   const verified = (report?.verification ?? []).filter((check) => check.outcome !== "not_run");
   if (verified.length) {

@@ -33,6 +33,7 @@ const INDEX_FIELDS = [
   "turnId",
   "pid",
   "pidMarker",
+  "pidCommandHint",
   "logFile",
   "errorMessage",
   "failureKind",
