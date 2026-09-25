@@ -63,6 +63,42 @@ function lockIsStale(lockPath, staleMs) {
   return Date.now() - stat.mtimeMs > staleMs;
 }
 
+/**
+ * Break a lock judged stale, safely against concurrent contenders. Several contenders can judge the
+ * same stale lock at once; if each renamed the path, a later one could rename away a fresh lock
+ * another had just acquired, admitting two holders. So breaking is serialized through a recovery
+ * gate, and staleness is re-checked inside it. While the stale lock exists nobody can create a new
+ * one (O_EXCL), so under the gate the path can only change through this breaker. An abandoned gate
+ * (its holder died in this microsecond window) is never broken automatically: fail closed.
+ */
+function recoverStaleLock(lockPath, staleMs) {
+  const gate = `${lockPath}.recover`;
+  let gateFd;
+  try {
+    gateFd = fs.openSync(gate, "wx");
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      throw error;
+    }
+    const holder = readLockOwner(gate);
+    if (holder && Number.isInteger(holder.pid) && !isPidAlive(holder.pid)) {
+      throw new Error(`Lock recovery gate ${gate} was abandoned by dead pid ${holder.pid}; remove it once no Codex companion process is running.`);
+    }
+    return false;
+  }
+  try {
+    fs.writeSync(gateFd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+    if (!lockIsStale(lockPath, staleMs)) {
+      return false;
+    }
+    breakStaleLock(lockPath);
+    return true;
+  } finally {
+    fs.closeSync(gateFd);
+    fs.rmSync(gate, { force: true });
+  }
+}
+
 function breakStaleLock(lockPath) {
   // Rename first so that exactly one contender wins the right to discard the stale lock.
   const graveyard = `${lockPath}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -109,8 +145,10 @@ export function withFileLock(lockPath, fn, options = {}) {
         throw error;
       }
       if (lockIsStale(lockPath, staleMs)) {
-        breakStaleLock(lockPath);
-        continue;
+        options.beforeRecover?.();
+        if (recoverStaleLock(lockPath, staleMs)) {
+          continue;
+        }
       }
       if (Date.now() >= deadline) {
         const owner = readLockOwner(lockPath);
@@ -175,8 +213,7 @@ export async function withFileLockAsync(lockPath, fn, options = {}) {
       if (error?.code !== "EEXIST") {
         throw error;
       }
-      if (lockIsStale(lockPath, staleMs)) {
-        breakStaleLock(lockPath);
+      if (lockIsStale(lockPath, staleMs) && recoverStaleLock(lockPath, staleMs)) {
         continue;
       }
       if (Date.now() >= deadline) {
