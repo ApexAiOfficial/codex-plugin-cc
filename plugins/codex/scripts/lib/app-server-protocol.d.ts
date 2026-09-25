@@ -6,6 +6,14 @@ import type {
   ServerNotification
 } from "../../.generated/app-server-types/index.js";
 import type {
+  CommandExecParams,
+  CommandExecResponse,
+  ThreadReadParams,
+  ThreadReadResponse,
+  ThreadUnsubscribeParams,
+  ThreadUnsubscribeResponse,
+  TurnSteerParams,
+  TurnSteerResponse,
   ExternalAgentConfigImportParams,
   ExternalAgentConfigImportResponse,
   ReviewStartParams,
@@ -68,6 +76,10 @@ export interface AppServerMethodMap {
   "review/start": { params: ReviewStartParams; result: ReviewStartResponse };
   "turn/start": { params: TurnStartParams; result: TurnStartResponse };
   "turn/interrupt": { params: TurnInterruptParams; result: TurnInterruptResponse };
+  "turn/steer": { params: TurnSteerParams; result: TurnSteerResponse };
+  "thread/read": { params: ThreadReadParams; result: ThreadReadResponse };
+  "thread/unsubscribe": { params: ThreadUnsubscribeParams; result: ThreadUnsubscribeResponse };
+  "command/exec": { params: CommandExecParams; result: CommandExecResponse };
 }
 
 export type AppServerMethod = keyof AppServerMethodMap;

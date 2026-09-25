@@ -10,13 +10,29 @@
     "noImplicitAny": false,
     "useUnknownInCatchVariables": false,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "plugins/codex/scripts/lib/app-server.mjs",
     "plugins/codex/scripts/lib/codex.mjs",
     "plugins/codex/scripts/lib/fs.mjs",
     "plugins/codex/scripts/lib/process.mjs",
+    "plugins/codex/scripts/lib/locking.mjs",
+    "plugins/codex/scripts/lib/state.mjs",
+    "plugins/codex/scripts/lib/tickets.mjs",
+    "plugins/codex/scripts/lib/tracked-jobs.mjs",
+    "plugins/codex/scripts/lib/ticket-commands.mjs",
+    "plugins/codex/scripts/lib/ticket-render.mjs",
+    "plugins/codex/scripts/lib/capabilities.mjs",
+    "plugins/codex/scripts/lib/evidence.mjs",
+    "plugins/codex/scripts/lib/worktree.mjs",
+    "plugins/codex/scripts/lib/control-channel.mjs",
+    "plugins/codex/scripts/lib/work-package.mjs",
+    "plugins/codex/scripts/lib/broker-lifecycle.mjs",
+    "plugins/codex/scripts/lib/args.mjs",
+    "plugins/codex/scripts/app-server-broker.mjs",
     "plugins/codex/scripts/lib/app-server-protocol.d.ts",
     "plugins/codex/.generated/app-server-types/**/*.ts"
   ]

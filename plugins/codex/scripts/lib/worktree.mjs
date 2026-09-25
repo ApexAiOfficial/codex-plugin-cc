@@ -72,7 +72,7 @@ function isInside(parent, candidate) {
 }
 
 function pathTraversalError(filePath) {
-  const error = new Error(`Refusing to integrate ${filePath}: path traverses a symlink.`);
+  const error = /** @type {Error & { code?: string }} */ (new Error(`Refusing to integrate ${filePath}: path traverses a symlink.`));
   error.code = "ERR_INTEGRATION_PATH_TRAVERSAL";
   return error;
 }
@@ -447,7 +447,9 @@ function restoreIntegrationJournal({ repoRoot, journalDir, manifest, protectLead
     errors.push(error);
   }
   if (diverged.length > 0) {
-    const error = new Error(`Refusing to overwrite paths changed after the interrupted integration: ${diverged.join(", ")}.`);
+    const error = /** @type {Error & { code?: string, paths?: string[] }} */ (
+      new Error(`Refusing to overwrite paths changed after the interrupted integration: ${diverged.join(", ")}.`)
+    );
     error.code = "ERR_INTEGRATION_RECOVERY_CONFLICT";
     error.paths = diverged;
     errors.unshift(error);
