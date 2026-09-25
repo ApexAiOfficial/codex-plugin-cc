@@ -50,6 +50,12 @@ export function sendControlMessage(workspaceRoot, jobId, message) {
   return id;
 }
 
+/**
+ * @param {string} workspaceRoot
+ * @param {string} jobId
+ * @param {string} messageId
+ * @param {{ timeoutMs?: number, isJobActive?: () => boolean }} [options]
+ */
 export async function waitForControlAck(workspaceRoot, jobId, messageId, { timeoutMs = 15000, isJobActive = () => true } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

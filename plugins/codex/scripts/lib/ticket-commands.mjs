@@ -612,6 +612,7 @@ async function handleDelegate(argv, ctx) {
     workdir = worktree.path;
   }
 
+  /** @type {{ job: any, ticket: any }} */
   let launched;
   try {
     launched = launchTicketTurn(workspaceRoot, ticketId, { create: {
@@ -906,7 +907,7 @@ function runAcceptanceCommand(command, cwd, timeoutMs) {
     maxBuffer: 64 * 1024 * 1024,
     windowsHide: true
   });
-  const timedOut = result.error?.code === "ETIMEDOUT";
+  const timedOut = /** @type {NodeJS.ErrnoException | undefined} */ (result.error)?.code === "ETIMEDOUT";
   return {
     command,
     exitCode: timedOut ? null : result.status ?? null,
