@@ -66,7 +66,6 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 ## Incomplete / next
 
 The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open items include:
-- observing the model-facing surfaces live in an interactive session: ledger in context, Stop nudge, monitor notification, `/codex:doctor`. The SessionStart ledger output itself is verified headless under Claude Code 2.1.280.
 - a real multi-turn ticket on Codex 0.156.1 (blocked by the account usage limit on 2026-09-24)
 - retention of closed tickets
 - model discovery (#638)
@@ -89,7 +88,7 @@ The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open 
 
 - Shared-checkout attribution: files changed by Codex through shell commands (not `fileChange` items) show as "unattributed", indistinguishable from the lead's concurrent edits.
 - Claim cross-checking is substring heuristics over normalized command text.
-- The monitor depends on the experimental plugin-monitor feature (interactive CLI only); `wait` and the Stop nudge are the fallbacks.
+- The monitor depends on Claude Code's plugin-monitor feature, which works only in interactive sessions and stops when a session is moved to the background. `wait` and the Stop nudge are the fallbacks.
 - The fork's marketplace name is still `openai-codex`, the same as upstream, so installing both through marketplaces would collide. Use `--plugin-dir` for testing.
 - Test suite runtime is about 2.5 min, and the timing-sensitive upstream tests remain.
 - An older Codex cannot resume threads a newer Codex wrote into the shared `~/.codex`. This was measured with 0.144.1 against the desktop app's 0.155-alpha, and resolved here by updating the CLI to 0.156.1. If the desktop app later moves ahead again, tickets fall back to a fresh thread with a handoff, and `doctor` warns.
@@ -98,9 +97,10 @@ The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open 
 ## Validation status
 
 At the most recent commit on `orchestration` (see `CHECKPOINT_HANDOFF.md` for the exact SHA and results):
-- `npm test`: 176 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
+- `npm test`: 181 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
 - `npm run build` (tsc check): passes.
-- A full test run leaves no stray processes. The harness stops brokers on exit and on signals.
+- A full test run leaves no stray processes and no temp or state dirs (measured).
+- Live plugin check in an interactive Claude Code 2.1.280 session: the ledger, the Stop nudge, the monitor notification, and `/codex:doctor` all pass (`RUNBOOK.md` → "Live plugin check").
 - Dogfooded against real Codex CLI 0.144.1 with 5 tickets: 1 review, 3 implement, and 1 implement that went through two rejection→followup cycles. The dogfood covered integrate, verify, a monitor notification, the resume fallback, and close/purge. Every accepted change passed independent verification outside the sandbox.
 
 ## Runtime assumptions

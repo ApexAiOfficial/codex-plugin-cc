@@ -18,6 +18,10 @@
 - `tests/drills/sandbox-containment-drill.mjs`: a manual drill confirming that nothing a sandboxed Codex command starts outlives the command on Linux.
 - `tests/drills/live-check-setup.mjs`: a disposable workspace with a fake Codex for the interactive plugin check.
 - Fix: a lock recovery gate left by a process whose pid was later reused (for example after a reboot) is now reported as abandoned, instead of making contenders time out with a misleading error.
+- Fix: the ticket monitor never started. Claude Code dispatches plugin skills by their namespaced name (`codex:codex-delegation`), and `on-skill-invoke` matches that name exactly. The monitor now registers both forms, and `watch` claims each notification so two watchers never double-notify.
+- The Stop hook's note about a running ticket no longer suggests `/codex:cancel`.
+- Fix (broker): a subagent thread that started after its parent's last client disconnected was never unsubscribed.
+- The test suite removes its temp dirs and their derived state dirs on exit; each run used to leave about 300 behind.
 
 ## 1.0.0
 

@@ -179,6 +179,23 @@ test("the broker unsubscribes a thread, and its subagent threads, once the last 
     assert.ok(child, `expected the subagent thread to be released too: ${unsubscribed}`);
   }));
 
+test("a subagent thread that starts after its parent's last client left is released too", (t) =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "subagent-late" }, async () => {
+    // Under load, the subagent's thread/started can reach the broker after the parent's owner
+    // disconnected; the broker then had nobody to hand it to and never unsubscribed it.
+    const dir = repo();
+    const before = fake.entries().length;
+    const { client } = await brokerClient(dir, t);
+    const { thread } = await client.request("thread/start", {});
+    await client.request("turn/start", { threadId: thread.id, input: [] });
+    await client.close();
+    const released = () =>
+      fake.entries().slice(before).filter((entry) => entry.method === "thread/unsubscribe").map((entry) => entry.params.threadId);
+    await waitFor(() => released().includes(thread.id));
+    const child = await waitFor(() => released().find((id) => id !== thread.id), { timeoutMs: 5000 });
+    assert.ok(child, "the late subagent thread was released");
+  }));
+
 test("a thread shared by two clients stays subscribed until the second one leaves", (t) =>
   withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
     const dir = repo();

@@ -2,35 +2,32 @@
 
 Operational recovery notes. This file is overwritten at each safe checkpoint; git history keeps the earlier versions. `PROJECT_STATUS.md` describes the system, `UPSTREAM_AUDIT.md` holds the upstream defect evidence, `IDEA_BANK_REVIEW.md` classifies the 100-item idea bank, and `RUNBOOK.md` holds validated procedures.
 
-## Current checkpoint — 2026-09-24 21:50 EDT
+## Current checkpoint — 2026-09-24 22:45 EDT
 
 - **Branch** `orchestration`, pushed to `origin` (ApexAiOfficial/codex-plugin-cc). `main` is untouched and equals upstream `db52e28`.
-- **Latest code checkpoint:** the commit containing this file (`git log -1`). The previous one is `ec5025d` (Codex 0.156.1, direction-aware skew check, broker drills).
-- **Validation:** `npm test` is 177/177 (176 at `ec5025d`, plus a locking test), and tsc is clean. The drills pass: `tests/drills/broker-drill.mjs`, `tests/drills/sandbox-containment-drill.mjs`. No stray processes.
-- **Codex CLI:** the standalone `codex` is now 0.156.1 (it was 0.144.1). The desktop app's `CODEX_CLI_PATH` is 0.155.0-alpha.16.4. `doctor` reports OK (companion newer). Roll back with `ln -sfn ~/.codex/packages/standalone/releases/0.144.1-x86_64-unknown-linux-musl ~/.codex/packages/standalone/current`.
-- **Codex account:** usage limit hit at 21:20 EDT; Codex says to retry at 23:10 EDT. The ticket `doctor-skew` was closed as abandoned, and the lead implemented that change.
+- **Latest code checkpoint:** the commit containing this file (`git log -1`). Earlier today: `54f68d3` (monitor fix), `4fe8ccb` (Linux-tier decisions), `ec5025d` (Codex 0.156.1).
+- **Validation:** `npm test` is 181/181 and tsc is clean. The drills pass (`tests/drills/broker-drill.mjs`, `sandbox-containment-drill.mjs`). A full run leaves no stray processes and no temp or state dirs (measured).
+- **Codex CLI:** the standalone `codex` is 0.156.1 (it was 0.144.1). The desktop app's `CODEX_CLI_PATH` is 0.155.0-alpha.16.4. `doctor` reports OK (companion newer). Roll back with `ln -sfn ~/.codex/packages/standalone/releases/0.144.1-x86_64-unknown-linux-musl ~/.codex/packages/standalone/current`.
+- **Codex account:** usage limit hit at 21:20 EDT; Codex says to retry at 23:10 EDT.
 - **Tickets:** none open in the dogfood state (`~/.cache/codex-companion-fork`).
-- **Live-check workspace:** staged at `~/.cache/codex-companion-live-check/` for the interactive check (item 1 below). It holds the ticket `staged`, whose state is in `~/.claude/plugins/data/codex-inline/state/repo-*`. Remove both with `node tests/drills/live-check-setup.mjs --cleanup` once the check is done.
+- **Live check:** done and cleaned up. The workspace, its `codex-inline` state, and the backgrounded session are all removed or stopped. The transcripts remain under `~/.claude/projects/-home-logan--cache-codex-companion-live-check-repo/`.
 
 ## Completed since the last handoff
 
-- **Codex version skew resolved.** Measured first: 0.144.1 fails `thread/resume` on a desktop-written thread (`paginated_threads`), while 0.155-alpha and 0.156.1 both succeed. 0.156.1 was tested side by side through `CODEX_COMPANION_CODEX_BIN`: protocol diff, tsc, and preflight. Then `codex update`. `doctor` is now direction-aware.
-- A ticket's quota/auth/infra error text is persisted and shown on the card. Found on the real usage-limit hit, where the reset time was hidden.
-- **Broker drills on real processes:** SessionEnd while busy, app-server death, broker death, and idle exit all pass. The RUNBOOK broker section is now [real].
-- **Linux tier decided on evidence:**
-  - cgroup/systemd containment is **dropped**. Codex's bwrap pid namespace already kills everything a sandboxed command starts, including setsid'd, nohup'd, and double-forked processes, with and without network.
-  - `flock(1)` locks are **deferred**. The O_EXCL lock plus recovery gate is correct under stress, and a `flock` gate conflicts with the portable fallback; see PROJECT_STATUS "Key design decisions".
-  - Fixed: a recovery gate left by a reused pid is reported as abandoned.
-- Headless check under Claude Code 2.1.280: `--plugin-dir` replaces the installed upstream `codex` plugin for that session (`codex@inline`), all `/codex:*` commands including `doctor` register, and the SessionStart hook prints the ticket ledger from the `codex-inline` data dir.
+- **Codex version skew resolved** by `codex update`, after a measured side-by-side test. `doctor` is now direction-aware, and a ticket's quota/auth error text shows on the card.
+- **Broker drills on real processes:** all four recovery cases pass.
+- **Linux tier:** cgroup/systemd containment dropped (Codex's bwrap pid namespace already contains commands; measured). `flock` deferred. The recovery gate records a start marker.
+- **Interactive live check (the human ran it):** the ledger, the Stop nudge, the monitor, and `/codex:doctor` all pass. It found that the **monitor never armed** (`on-skill-invoke` matches the namespaced skill name exactly); fixed and re-verified live.
+- **The "flaky" broker test was a real leak:** a subagent thread started after its parent's last client left was never unsubscribed. Fixed, with a deterministic test that fails on the old code.
+- **Test hygiene:** the suite no longer leaks about 300 temp and state dirs per run.
 
 ## Next-work order (start at the top)
 
-1. **Interactive live check.** The human runs one session (instructions are in the chat that produced this checkpoint, and in `RUNBOOK.md` → "Live plugin check"). The lead then analyzes the transcript under `~/.claude/projects/-home-logan--cache-codex-companion-live-check-repo/`, fixes what fails, and cleans up.
-2. **Real multi-turn ticket on Codex 0.156.1, after 23:10 EDT.** Two turns on one thread, where the second depends on context from the first. Confirm that the `threadId` is unchanged and that there is no `threadHistory` reset.
-3. **Retention** of closed tickets, job history, and journals (ideas 48–49). A good Codex implement ticket.
-4. **Model discovery** via `model/list`, and role-based model/effort guidance (#638, ideas 50–52).
-5. **Delegation metrics** (ideas 79–81), only after real usage.
-6. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
+1. **Real multi-turn ticket on Codex 0.156.1, after 23:10 EDT.** Use it for real work: retention (item 2) as a two-turn implement ticket whose second turn depends on the first. Confirm that the `threadId` is unchanged and there is no `threadHistory` reset.
+2. **Retention** of closed tickets, job history, and journals (ideas 48–49).
+3. **Model discovery** via `model/list`, and role-based model/effort guidance (#638, ideas 50–52). It can be investigated without quota (`model/list` makes no model call).
+4. **Delegation metrics** (ideas 79–81), only after real usage.
+5. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
 
 ## Exact first action after compaction
 
@@ -43,10 +40,10 @@ export CODEX_COMPANION="$PWD/plugins/codex/scripts/codex-companion.mjs"
 
 ## Known issues / unresolved
 
-- One broker test (`…subagent threads, once the last client disconnects`) failed once under full-suite load. It has had a 30 s wait since; watch for recurrence.
+- The broker subagent-release test's flakiness was the late-subagent leak fixed in this checkpoint. If it ever fails again, that is a new defect.
 - `close --purge` on an already-purged ticket still prints "Removed the retained worktree" (cosmetic).
-- `~/.claude/plugins/data/codex-openai-codex/state/codex-plugin-test-*` holds stale state from pre-hermetic test runs. It is safe to delete and has not been deleted.
-- A standalone `claude` outside the desktop app is not logged in (headless runs say "Not logged in"), so the interactive check needs the human to sign in once.
+- Stale dirs from test runs before the cleanup fix remain: about 4,100 `/tmp/codex-plugin-test-*`, about 1,650 `/tmp/codex-companion/codex-plugin-test-*`, and 99 `~/.claude/plugins/data/codex-openai-codex/state/codex-plugin-test-*`. They are safe to delete. Claude's bulk delete in `/tmp` was blocked by the permission classifier, so this is left to the human.
+- The standalone Claude Code (`~/.config/Claude/claude-code/<version>/claude`) is now signed in and was switched to auto mode during the live check.
 
 ## Do not destroy
 

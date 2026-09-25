@@ -180,10 +180,16 @@ async function main() {
     const target = activeRequestSocket ?? activeStreamSocket;
     if (message.method === "thread/started" && message.params?.thread?.id) {
       // Subagent threads inherit their parent's owners; otherwise the socket receiving the stream.
+      const threadId = message.params.thread.id;
       const parentOwners = threadOwners.get(message.params.thread.parentThreadId ?? "");
       const owners = parentOwners?.size ? [...parentOwners] : target ? [target] : [];
       for (const owner of owners) {
-        claimThread(owner, message.params.thread.id);
+        claimThread(owner, threadId);
+      }
+      if (!threadOwners.get(threadId)?.size) {
+        // Nobody is left to own it: a subagent that started after its parent's last client
+        // disconnected. Release it now, or it stays loaded for the broker's lifetime.
+        unsubscribeWhenUnowned(threadId);
       }
     }
     if (!target) {

@@ -27,7 +27,7 @@ npm run build                 # tsc over the runtime modules
 ps -eo pid,cmd | grep -E 'app-server-broker.mjs serve|codex-plugin-test|task-worker' | grep -v grep   # expect nothing
 ```
 
-A test run killed by a timeout used to strand brokers. The harness now stops them on exit and on signals. If the `ps` line shows `/tmp/codex-plugin-test-*` or `app-server-broker.mjs serve` processes, kill them; they are test-only.
+A test run killed by a timeout used to strand brokers. The harness now stops them on exit and on signals, and removes the temp dirs and state dirs it created (set `CODEX_TEST_KEEP_TEMP=1` to keep them for debugging). If the `ps` line shows `/tmp/codex-plugin-test-*` or `app-server-broker.mjs serve` processes, kill them; they are test-only.
 
 ## Dogfood the fork next to an installed upstream plugin [real]
 
@@ -142,9 +142,16 @@ Symptom: every companion command fails with `Lock recovery gate …state.lock.re
 
 The state dir (`$CLAUDE_PLUGIN_DATA/state/<repo>-<hash>/`), `*.integration-journal` directories, ticket worktrees (use `close --purge`), and `refs/codex-companion/*` refs of open tickets.
 
-## Live plugin check [pending: headless parts real]
+## Live plugin check [real]
 
-Checks the model-facing surfaces in one interactive session, against a fake Codex in a disposable repo (no quota). Covered: the SessionStart ledger reaching the model, the Stop reminder, a monitor notification, and `/codex:doctor`. Verified headless (no login needed): `--plugin-dir` replaces the installed upstream `codex` plugin for that session, and the SessionStart hook prints the ledger.
+Checks the model-facing surfaces in one interactive session, against a fake Codex in a disposable repo (no quota). Last run on 2026-09-24 with Claude Code 2.1.280, and all of these pass:
+
+- `--plugin-dir` replaces the installed upstream `codex` plugin for that session (`codex@inline`, data dir `~/.claude/plugins/data/codex-inline`).
+- The SessionStart ledger reaches the model: Claude named the staged ticket without running anything.
+- The Stop reminder blocks once for a finished, unreviewed turn. The terminal labels it "Stop hook error"; that is only how Claude Code shows a blocking Stop hook.
+- The monitor arms on the first use of the skill and delivers a notification about 8 s after the turn ends. The first run found it never armed (a skill-name mismatch), which is now fixed.
+- `/codex:doctor` runs and prints the full report.
+- When the session is moved to the background, Claude Code stops plugin monitors ("1 monitor couldn't be moved and was stopped"). `wait` and the Stop reminder still report results then.
 
 ```bash
 node tests/drills/live-check-setup.mjs                                   # repo, fake Codex, one staged ticket
@@ -152,8 +159,8 @@ cd ~/.cache/codex-companion-live-check/repo
 CODEX_COMPANION_CODEX_BIN="$HOME/.cache/codex-companion-live-check/bin/codex" ~/.config/Claude/claude-code/<version>/claude --plugin-dir "<fork>/plugins/codex" --allowedTools "Bash(node:*)" "Bash(sleep:*)"
 ```
 
-In the session, paste the prompt from `tests/drills/live-check-prompt.md`, wait for the monitor notification, run `/codex:doctor`, then `/exit`. The transcript is under `~/.claude/projects/-home-logan--cache-codex-companion-live-check-repo/`. Clean up with `node tests/drills/live-check-setup.mjs --cleanup`.
+In the session, paste the prompt from `tests/drills/live-check-prompt.md`, wait for the monitor notification, run `/codex:doctor`, then `/exit`. Commands that contain `$CODEX_COMPANION` still ask for permission despite `--allowedTools`. If `/exit` moves the session to the background, stop it with `claude stop <id>`. The transcript is under `~/.claude/projects/-home-logan--cache-codex-companion-live-check-repo/`. Clean up with `node tests/drills/live-check-setup.mjs --cleanup`.
 
 ## Not yet validated here
 
-These are expected to work but have not been exercised end to end: the interactive live check above, Windows and macOS behavior, and account switching mid-ticket.
+These are expected to work but have not been exercised end to end: Windows and macOS behavior, and account switching mid-ticket.

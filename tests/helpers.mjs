@@ -5,6 +5,7 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 
 import { loadBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 // Tests must not inherit the host Claude session's plugin wiring. When the suite runs inside a
 // Claude Code session with this plugin installed, these variables point at the user's real
@@ -56,7 +57,34 @@ function shutDownTestBrokers() {
   }
 }
 
-process.on("exit", shutDownTestBrokers);
+// Every temp dir this process created, plus the state dir the runtime derived for it under the
+// fallback root (CLAUDE_PLUGIN_DATA is scrubbed above), would otherwise outlive the run: each
+// full run used to leave ~200 dirs in the temp dir and ~90 under <tmp>/codex-companion.
+function removeTestDirs() {
+  const fallbackRoot = path.join(os.tmpdir(), "codex-companion") + path.sep;
+  for (const dir of createdTempDirs) {
+    try {
+      const stateDir = resolveStateDir(dir);
+      if (stateDir.startsWith(fallbackRoot)) {
+        fs.rmSync(stateDir, { recursive: true, force: true });
+      }
+    } catch {
+      // The dir may already be gone; nothing to derive.
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // A still-running detached worker may hold files open; leave it.
+    }
+  }
+}
+
+process.on("exit", () => {
+  shutDownTestBrokers();
+  if (!process.env.CODEX_TEST_KEEP_TEMP) {
+    removeTestDirs();
+  }
+});
 // A test file killed by a timeout or Ctrl-C must not strand brokers either.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.once(signal, () => {

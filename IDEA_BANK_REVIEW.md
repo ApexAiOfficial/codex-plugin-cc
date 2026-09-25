@@ -11,7 +11,7 @@ Classification of the 100-item orchestration idea bank against what the fork act
 | 5 | Structured work-package contracts | Adopted | `prompts/work-package.md`, `schemas/work-report.schema.json` |
 | 6 | Isolated parallel writers | Adopted | `--isolation worktree` |
 | 7 | Evidence-based acceptance | Adopted | Snapshots, ownership checks, claim checks, `verify` |
-| 8 | Event-driven completion | Adopted | Plugin monitor, background `wait`, Stop nudge |
+| 8 | Event-driven completion | Adopted | Plugin monitor, background `wait`, Stop nudge (all three verified in a live session) |
 | 9 | Dependency-aware DAG scheduling | Deferred | Claude sequences tickets; no workload has needed a DAG executor |
 | 10 | Independent peer modes | Adopted | `investigate` / `review` roles, scratch worktrees |
 | 11 | Mid-flight steering | Adopted | `steer` via `turn/steer` |
