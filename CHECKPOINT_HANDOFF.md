@@ -2,11 +2,11 @@
 
 Operational recovery notes. This file is overwritten at each safe checkpoint; git history keeps the earlier versions. `PROJECT_STATUS.md` describes the system, `UPSTREAM_AUDIT.md` holds the upstream defect evidence, `IDEA_BANK_REVIEW.md` classifies the 100-item idea bank, and `RUNBOOK.md` holds validated procedures.
 
-## Current checkpoint — 2026-09-24 22:45 EDT
+## Current checkpoint — 2026-09-24 22:45 EDT (model discovery added)
 
 - **Branch** `orchestration`, pushed to `origin` (ApexAiOfficial/codex-plugin-cc). `main` is untouched and equals upstream `db52e28`.
 - **Latest code checkpoint:** the commit containing this file (`git log -1`). Earlier today: `54f68d3` (monitor fix), `4fe8ccb` (Linux-tier decisions), `ec5025d` (Codex 0.156.1).
-- **Validation:** `npm test` is 181/181 and tsc is clean. The drills pass (`tests/drills/broker-drill.mjs`, `sandbox-containment-drill.mjs`). A full run leaves no stray processes and no temp or state dirs (measured).
+- **Validation:** `npm test` is 183/183 and tsc is clean. The drills pass (`tests/drills/broker-drill.mjs`, `sandbox-containment-drill.mjs`). A full run leaves no stray processes and no temp or state dirs (measured).
 - **Codex CLI:** the standalone `codex` is 0.156.1 (it was 0.144.1). The desktop app's `CODEX_CLI_PATH` is 0.155.0-alpha.16.4. `doctor` reports OK (companion newer). Roll back with `ln -sfn ~/.codex/packages/standalone/releases/0.144.1-x86_64-unknown-linux-musl ~/.codex/packages/standalone/current`.
 - **Codex account:** usage limit hit at 21:20 EDT; Codex says to retry at 23:10 EDT.
 - **Tickets:** none open in the dogfood state (`~/.cache/codex-companion-fork`).
@@ -20,18 +20,18 @@ Operational recovery notes. This file is overwritten at each safe checkpoint; gi
 - **Interactive live check (the human ran it):** the ledger, the Stop nudge, the monitor, and `/codex:doctor` all pass. It found that the **monitor never armed** (`on-skill-invoke` matches the namespaced skill name exactly); fixed and re-verified live.
 - **The "flaky" broker test was a real leak:** a subagent thread started after its parent's last client left was never unsubscribed. Fixed, with a deterministic test that fails on the old code.
 - **Test hygiene:** the suite no longer leaks about 300 temp and state dirs per run.
+- **Model discovery (#638):** `preflight` lists the models and efforts, and ticket `--model`/`--effort` are validated before a turn runs. Verified against real Codex 0.156.1.
 
 ## Next-work order (start at the top)
 
 1. **Real multi-turn ticket on Codex 0.156.1, after 23:10 EDT.** Use it for real work: retention (item 2) as a two-turn implement ticket whose second turn depends on the first. Confirm that the `threadId` is unchanged and there is no `threadHistory` reset.
 2. **Retention** of closed tickets, job history, and journals (ideas 48–49).
-3. **Model discovery** via `model/list`, and role-based model/effort guidance (#638, ideas 50–52). It can be investigated without quota (`model/list` makes no model call).
-4. **Delegation metrics** (ideas 79–81), only after real usage.
-5. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
+3. **Delegation metrics** (ideas 79–81), only after real usage.
+4. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
 
 ## Exact first action after compaction
 
-Read this file. Run `node plugins/codex/scripts/codex-companion.mjs doctor` with the dogfood env below and confirm there are no FAILs. Then continue from the top of the list above: check whether the human has reported the live check, and check the time against the Codex reset.
+Read this file. Run `node plugins/codex/scripts/codex-companion.mjs doctor` with the dogfood env below and confirm there are no FAILs. Then continue from the top of the list above. Check the time against the Codex reset (23:10 EDT on 2026-09-24).
 
 ```bash
 export CLAUDE_PLUGIN_DATA="$HOME/.cache/codex-companion-fork"

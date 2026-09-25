@@ -35,7 +35,7 @@ This audit checks open issues and PRs on [openai/codex-plugin-cc](https://github
 
 | Upstream | Disposition |
 | --- | --- |
-| #638 (GPT-5.6 models, efforts, prompting) | **Deferred with reason.** We hardcode no model generations (effort validation accepts any token; the only alias is `spark`). Model discovery via `model/list` is on the roadmap. |
+| #638 (GPT-5.6 models, efforts, prompting) | **Solved differently.** Nothing is hardcoded. On Codex 0.156.1, `model/list` reports the models (currently gpt-6-astra/sol/luna, gpt-5.6-*, gpt-5.5) and each model's efforts, up to `ultra`. `preflight` shows them, and ticket `--model`/`--effort` are validated against them before a turn runs. The stock `task` path is unchanged. |
 | #586 (sharded parallel review) | **Not adopted.** Its workarounds (staggered launches, supervision) exist because of the substrate defects fixed above; tickets cover parallel review generically. |
 
 ## Defects found by dogfooding (not reported upstream)
