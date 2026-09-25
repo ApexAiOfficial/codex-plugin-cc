@@ -268,6 +268,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       const status = stored?.status === "cancelled" ? "cancelled" : (execution.statusOverride ?? completionStatus);
       const phase = status === "completed" ? "done" : status;
       const base = { ...runningRecord, ...(stored ?? {}) };
+      const errorMessage = status === "failed" ? execution.errorMessage ?? base.errorMessage ?? null : base.errorMessage ?? null;
       writeJobFile(job.workspaceRoot, job.id, {
         ...base,
         status,
@@ -277,6 +278,7 @@ export async function runTrackedJob(job, runner, options = {}) {
         phase,
         completedAt,
         failureKind: execution.failureKind ?? null,
+        errorMessage,
         result: execution.payload,
         rendered: execution.rendered
       });
@@ -288,6 +290,7 @@ export async function runTrackedJob(job, runner, options = {}) {
         summary: execution.summary,
         phase,
         failureKind: execution.failureKind ?? null,
+        errorMessage,
         pid: null,
         completedAt
       });

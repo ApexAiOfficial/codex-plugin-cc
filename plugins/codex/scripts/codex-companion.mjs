@@ -161,6 +161,7 @@ function normalizeArgv(argv) {
 function parseCommandInput(argv, config = {}) {
   return parseArgs(normalizeArgv(argv), {
     ...config,
+    stopAtFirstPositional: Boolean(config.stopAtFirstPositional && argv.length === 1),
     aliasMap: {
       C: "cwd",
       ...(config.aliasMap ?? {})
@@ -191,12 +192,20 @@ function shorten(text, limit = 96) {
   return `${normalized.slice(0, limit - 3)}...`;
 }
 
-function firstMeaningfulLine(text, fallback) {
-  const line = String(text ?? "")
-    .split(/\r?\n/)
-    .map((value) => value.trim())
-    .find(Boolean);
-  return line ?? fallback;
+function executionSummary(status, output, failureMessage, fallback) {
+  const text = status === 0 ? output || fallback : failureMessage || output || fallback;
+  return shorten(text);
+}
+
+function executionErrorMessage(result, failureMessage, fallback) {
+  if (result.status === 0) {
+    return undefined;
+  }
+  return result.error?.message || failureMessage || fallback;
+}
+
+function resultFailureMessage(result) {
+  return result.error?.message || result.turn?.error?.message || result.stderr || "";
 }
 
 async function buildSetupReport(cwd, actionsTaken = []) {
@@ -423,6 +432,7 @@ async function executeReviewRun(request) {
       },
       { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
     );
+    const failureMessage = resultFailureMessage(result);
 
     return {
       exitStatus: result.status,
@@ -430,7 +440,8 @@ async function executeReviewRun(request) {
       turnId: result.turnId,
       payload,
       rendered,
-      summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
+      summary: executionSummary(result.status, result.reviewText, failureMessage, `${reviewName} completed.`),
+      errorMessage: executionErrorMessage(result, failureMessage, `${reviewName} failed.`),
       jobTitle: `Codex ${reviewName}`,
       jobClass: "review",
       targetLabel: target.label
@@ -448,8 +459,9 @@ async function executeReviewRun(request) {
   });
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
-    failureMessage: result.error?.message ?? result.stderr
+    failureMessage: resultFailureMessage(result)
   });
+  const failureMessage = resultFailureMessage(result);
   const payload = {
     review: reviewName,
     target,
@@ -481,7 +493,13 @@ async function executeReviewRun(request) {
       targetLabel: context.target.label,
       reasoningSummary: result.reasoningSummary
     }),
-    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
+    summary: executionSummary(
+      result.status,
+      parsed.parsed?.summary ?? parsed.parseError ?? result.finalMessage,
+      failureMessage,
+      `${reviewName} finished.`
+    ),
+    errorMessage: executionErrorMessage(result, failureMessage, `${reviewName} failed.`),
     jobTitle: `Codex ${reviewName}`,
     jobClass: "review",
     targetLabel: context.target.label
@@ -529,7 +547,7 @@ async function executeTaskRun(request) {
   const interrupted = Boolean(request.controller?.interruptRequested) || result.turn?.status === "interrupted";
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
-  const failureMessage = result.error?.message ?? result.stderr ?? "";
+  const failureMessage = resultFailureMessage(result);
   const rendered = renderTaskResult(
     {
       rawOutput,
@@ -557,7 +575,8 @@ async function executeTaskRun(request) {
     turnId: result.turnId,
     payload,
     rendered,
-    summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
+    summary: executionSummary(result.status, rawOutput, failureMessage, `${taskMetadata.title} finished.`),
+    errorMessage: executionErrorMessage(result, failureMessage, `${taskMetadata.title} failed.`),
     jobTitle: taskMetadata.title,
     jobClass: "task",
     write: Boolean(request.write)
@@ -779,6 +798,7 @@ async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    stopAtFirstPositional: true,
     aliasMap: {
       m: "model"
     }

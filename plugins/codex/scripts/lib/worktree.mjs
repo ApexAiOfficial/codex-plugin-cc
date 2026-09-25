@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,7 +11,7 @@ import { formatCommandFailure, runCommand } from "./process.mjs";
 // Ignored dependency directories that a fresh worktree lacks and Codex cannot reinstall offline.
 export const DEFAULT_LINKED_DIRS = ["node_modules", ".venv", "venv"];
 const REF_PREFIX = "refs/codex-companion/tickets";
-const JOURNAL_VERSION = 1;
+const JOURNAL_VERSION = 2;
 const JOURNAL_MANIFEST = "manifest.json";
 const SNAPSHOT_IDENTITY = {
   GIT_AUTHOR_NAME: "Codex Companion",
@@ -259,6 +259,50 @@ function mergeText(repoRoot, ours, base, theirs, labels) {
   }
 }
 
+function sha256(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+function intendedTargetState(step) {
+  if (step.action === "delete") {
+    return { kind: "absent" };
+  }
+  const kind = step.entry.mode === "120000" ? "symlink" : "file";
+  return { kind, sha256: sha256(step.entry.content) };
+}
+
+function readTargetState(target) {
+  let stat;
+  try {
+    stat = fs.lstatSync(target);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { kind: "absent" };
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    return { kind: "symlink", sha256: sha256(fs.readlinkSync(target, { encoding: "buffer" })) };
+  }
+  if (!stat.isFile()) {
+    return { kind: "other" };
+  }
+  return { kind: "file", mode: stat.mode & 0o7777, sha256: sha256(fs.readFileSync(target)) };
+}
+
+function sameTargetState(actual, expected) {
+  if (actual.kind !== expected.kind) {
+    return false;
+  }
+  if (expected.kind === "absent") {
+    return true;
+  }
+  if (actual.sha256 !== expected.sha256) {
+    return false;
+  }
+  return expected.kind !== "file" || !Number.isInteger(expected.mode) || actual.mode === expected.mode;
+}
+
 function captureTarget(target, journalDir, index) {
   let stat;
   try {
@@ -273,14 +317,16 @@ function captureTarget(target, journalDir, index) {
   const dataFile = `${index}.bin`;
   const dataPath = path.join(journalDir, dataFile);
   if (stat.isSymbolicLink()) {
-    fs.writeFileSync(dataPath, fs.readlinkSync(target, { encoding: "buffer" }));
-    return { kind: "symlink", dataFile };
+    const data = fs.readlinkSync(target, { encoding: "buffer" });
+    fs.writeFileSync(dataPath, data);
+    return { kind: "symlink", sha256: sha256(data), dataFile };
   }
   if (!stat.isFile()) {
     throw new Error(`Cannot journal non-file integration target: ${target}`);
   }
-  fs.copyFileSync(target, dataPath);
-  return { kind: "file", mode: stat.mode & 0o7777, dataFile };
+  const data = fs.readFileSync(target);
+  fs.writeFileSync(dataPath, data);
+  return { kind: "file", mode: stat.mode & 0o7777, sha256: sha256(data), dataFile };
 }
 
 function writeManifest(journalDir, manifest) {
@@ -298,7 +344,11 @@ function createIntegrationJournal({ repoRoot, ticketId, journalDir, plan, integr
       .filter((step) => step.action === "write" || step.action === "delete")
       .map((step, index) => {
         const target = assertSafeTarget(repoRoot, step.path);
-        return { path: step.path, state: captureTarget(target, journalDir, index) };
+        return {
+          path: step.path,
+          state: captureTarget(target, journalDir, index),
+          intendedState: intendedTargetState(step)
+        };
       });
     const manifest = {
       version: JOURNAL_VERSION,
@@ -369,11 +419,22 @@ function restoreIntegratedRef(repoRoot, manifest) {
   }
 }
 
-function restoreIntegrationJournal({ repoRoot, journalDir, manifest }) {
+function restoreIntegrationJournal({ repoRoot, journalDir, manifest, protectLeadChanges = false }) {
   const errors = [];
   const restored = [];
+  const diverged = [];
   for (const entry of manifest.entries) {
     try {
+      if (protectLeadChanges) {
+        const currentState = readTargetState(assertSafeTarget(repoRoot, entry.path));
+        if (sameTargetState(currentState, entry.state)) {
+          continue;
+        }
+        if (!sameTargetState(currentState, entry.intendedState)) {
+          diverged.push(entry.path);
+          continue;
+        }
+      }
       restoreTarget(repoRoot, journalDir, entry);
       restored.push(entry.path);
     } catch (error) {
@@ -385,8 +446,18 @@ function restoreIntegrationJournal({ repoRoot, journalDir, manifest }) {
   } catch (error) {
     errors.push(error);
   }
-  if (errors.length > 0) {
-    throw new AggregateError(errors, `Failed to restore interrupted integration from ${journalDir}.`);
+  if (diverged.length > 0) {
+    const error = new Error(`Refusing to overwrite paths changed after the interrupted integration: ${diverged.join(", ")}.`);
+    error.code = "ERR_INTEGRATION_RECOVERY_CONFLICT";
+    error.paths = diverged;
+    errors.unshift(error);
+  }
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  if (errors.length > 1) {
+    const suffix = diverged.length > 0 ? ` Diverged paths: ${diverged.join(", ")}.` : "";
+    throw new AggregateError(errors, `Failed to restore interrupted integration from ${journalDir}.${suffix}`);
   }
   fs.rmSync(journalDir, { recursive: true, force: true });
   return restored;
@@ -416,11 +487,16 @@ export function recoverInterruptedIntegration({ repoRoot, worktree, journalDir =
     manifest.version !== JOURNAL_VERSION ||
     manifest.repoRoot !== path.resolve(repoRoot) ||
     !Array.isArray(manifest.entries) ||
+    !manifest.entries.every((entry) =>
+      typeof entry.path === "string" &&
+      typeof entry.state?.kind === "string" &&
+      typeof entry.intendedState?.kind === "string"
+    ) ||
     typeof manifest.integratedRef !== "string"
   ) {
     throw new Error(`Invalid integration journal manifest: ${manifestPath}`);
   }
-  const restored = restoreIntegrationJournal({ repoRoot, journalDir, manifest });
+  const restored = restoreIntegrationJournal({ repoRoot, journalDir, manifest, protectLeadChanges: true });
   return { recovered: true, journalDir, restored };
 }
 

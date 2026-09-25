@@ -126,6 +126,9 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.summary) {
     lines.push(`  Summary: ${job.summary}`);
   }
+  if (job.status === "failed" && job.errorMessage) {
+    lines.push(`  Error: ${job.errorMessage}`);
+  }
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
   }
@@ -402,12 +405,19 @@ export function renderJobStatusReport(job) {
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
-  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
-    const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
+  const errorMessage = storedJob?.errorMessage ?? job.errorMessage ?? null;
+  const finalizeOutput = (value) => {
+    let output = value.endsWith("\n") ? value : `${value}\n`;
+    if (threadId) {
+      output += `\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    if ((storedJob?.status ?? job.status) === "failed" && errorMessage && !output.includes(`Error: ${errorMessage}`)) {
+      output += `\nError: ${errorMessage}\n`;
+    }
+    return output;
+  };
+  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
+    return finalizeOutput(storedJob.rendered);
   }
 
   const rawOutput =
@@ -415,19 +425,11 @@ export function renderStoredJobResult(job, storedJob) {
     (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
     "";
   if (rawOutput) {
-    const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return finalizeOutput(rawOutput);
   }
 
   if (storedJob?.rendered) {
-    const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return finalizeOutput(storedJob.rendered);
   }
 
   const lines = [
@@ -446,10 +448,8 @@ export function renderStoredJobResult(job, storedJob) {
     lines.push(`Summary: ${job.summary}`);
   }
 
-  if (job.errorMessage) {
-    lines.push("", job.errorMessage);
-  } else if (storedJob?.errorMessage) {
-    lines.push("", storedJob.errorMessage);
+  if (errorMessage) {
+    lines.push("", `Error: ${errorMessage}`);
   } else {
     lines.push("", "No captured result payload was stored for this job.");
   }

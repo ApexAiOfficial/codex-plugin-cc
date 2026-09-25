@@ -98,7 +98,11 @@ function normalizeArgv(argv) {
 }
 
 function parse(argv, config) {
-  return parseArgs(normalizeArgv(argv), { ...config, aliasMap: { C: "cwd", m: "model", ...(config.aliasMap ?? {}) } });
+  return parseArgs(normalizeArgv(argv), {
+    ...config,
+    stopAtFirstPositional: Boolean(config.stopAtFirstPositional && argv.length === 1),
+    aliasMap: { C: "cwd", m: "model", ...(config.aliasMap ?? {}) }
+  });
 }
 
 function output(value, rendered, asJson) {
@@ -556,7 +560,8 @@ async function handleDelegate(argv, ctx) {
   const { options, positionals } = parse(argv, {
     valueOptions: ["ticket", "role", "isolation", "model", "effort", "brief-file", "cwd", "title", "acceptance-notes"],
     multiValueOptions: ["owns", "interface", "accept"],
-    booleanOptions: ["json", "read-only", "network"]
+    booleanOptions: ["json", "read-only", "network"],
+    stopAtFirstPositional: true
   });
   const cwd = resolveCwd(options);
   const workspaceRoot = requireRepository(cwd);
@@ -658,7 +663,8 @@ async function handleDelegate(argv, ctx) {
 async function handleFollowup(argv, ctx) {
   const { options, positionals } = parse(argv, {
     valueOptions: ["brief-file", "model", "effort", "cwd"],
-    booleanOptions: ["json", "no-verification"]
+    booleanOptions: ["json", "no-verification"],
+    stopAtFirstPositional: true
   });
   const cwd = resolveCwd(options);
   const workspaceRoot = resolveWorkspaceRoot(cwd);
@@ -700,7 +706,8 @@ async function handleFollowup(argv, ctx) {
 async function handleSteer(argv, ctx) {
   const { options, positionals } = parse(argv, {
     valueOptions: ["cwd", "timeout-ms"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json"],
+    stopAtFirstPositional: true
   });
   const workspaceRoot = resolveWorkspaceRoot(resolveCwd(options));
   const ticket = requireTicket(workspaceRoot, positionals[0]);

@@ -13,6 +13,12 @@ export function parseArgs(argv, config = {}) {
       options[key] = value;
     }
   };
+  const addPositional = (token) => {
+    positionals.push(token);
+    if (config.stopAtFirstPositional) {
+      passthrough = true;
+    }
+  };
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -28,7 +34,7 @@ export function parseArgs(argv, config = {}) {
     }
 
     if (!token.startsWith("-") || token === "-") {
-      positionals.push(token);
+      addPositional(token);
       continue;
     }
 
@@ -53,7 +59,7 @@ export function parseArgs(argv, config = {}) {
         continue;
       }
 
-      positionals.push(token);
+      addPositional(token);
       continue;
     }
 
@@ -75,7 +81,7 @@ export function parseArgs(argv, config = {}) {
       continue;
     }
 
-    positionals.push(token);
+    addPositional(token);
   }
 
   return { options, positionals };

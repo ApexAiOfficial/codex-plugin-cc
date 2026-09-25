@@ -37,7 +37,10 @@ export function runCommandChecked(command, args = [], options = {}) {
 }
 
 export function binaryAvailable(command, versionArgs = ["--version"], options = {}) {
-  const result = runCommand(command, versionArgs, options);
+  // A missing cwd produces the same spawnSync ENOENT as a missing executable. Availability
+  // probes do not need the caller's working directory, so fall back to this process's cwd.
+  const probeOptions = options.cwd && !fs.existsSync(options.cwd) ? { ...options, cwd: undefined } : options;
+  const result = runCommand(command, versionArgs, probeOptions);
   if (result.error && /** @type {NodeJS.ErrnoException} */ (result.error).code === "ENOENT") {
     return { available: false, detail: "not found" };
   }
