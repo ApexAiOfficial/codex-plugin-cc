@@ -86,7 +86,12 @@ async function handleSessionEnd(input) {
   const pidMarker = brokerSession?.pidMarker ?? null;
 
   if (brokerEndpoint) {
-    await sendBrokerShutdown(brokerEndpoint);
+    // The broker is per workspace, so another Claude session may still be using it. A busy broker
+    // declines and later exits on its own once idle.
+    const { shutdown } = await sendBrokerShutdown(brokerEndpoint, { ifIdle: true });
+    if (!shutdown) {
+      return;
+    }
   }
 
   // Jobs are deliberately left alone. Background workers own a private app-server (not this

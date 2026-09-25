@@ -13,6 +13,10 @@ const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact
 // Requests that subscribe the shared upstream connection to a thread (by params or result).
 const THREAD_CLAIMING_METHODS = new Set(["thread/start", "thread/resume", "thread/fork", "turn/start", "review/start", "thread/compact/start"]);
 const UNSUBSCRIBE_WAIT_MS = 5000;
+// A broker with no clients for this long exits on its own, so a Claude session that ended without
+// SessionEnd (crash, killed terminal) cannot leave it running forever.
+const IDLE_EXIT_ENV = "CODEX_COMPANION_BROKER_IDLE_MS";
+const DEFAULT_IDLE_EXIT_MS = 30 * 60 * 1000;
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -258,7 +262,14 @@ async function main() {
         }
 
         if (message.id !== undefined && message.method === "broker/shutdown") {
-          send(socket, { id: message.id, result: {} });
+          // SessionEnd of one Claude session must not kill a broker another session is using:
+          // with ifIdle, decline while any other client is connected or a request is in flight.
+          const others = [...sockets].filter((candidate) => candidate !== socket && !candidate.destroyed);
+          if (message.params?.ifIdle && (others.length > 0 || activeRequestSocket || activeStreamSocket)) {
+            send(socket, { id: message.id, result: { shutdown: false, reason: "busy", clients: others.length } });
+            continue;
+          }
+          send(socket, { id: message.id, result: { shutdown: true } });
           await shutdown(server);
           process.exit(0);
         }
@@ -343,6 +354,7 @@ async function main() {
       sockets.delete(socket);
       clearSocketOwnership(socket);
       releaseSocketThreads(socket);
+      armIdleExit();
     });
 
     socket.on("error", () => {
@@ -351,6 +363,28 @@ async function main() {
       releaseSocketThreads(socket);
     });
   });
+
+  const idleExitMs = Number(process.env[IDLE_EXIT_ENV] ?? DEFAULT_IDLE_EXIT_MS);
+  let idleTimer = null;
+  function armIdleExit() {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (!(idleExitMs > 0) || sockets.size > 0) {
+      return;
+    }
+    idleTimer = setTimeout(async () => {
+      if (sockets.size === 0 && !terminating) {
+        process.stderr.write(`[broker] idle for ${idleExitMs}ms with no clients; exiting.\n`);
+        await shutdown(server);
+        process.exit(0);
+      }
+    }, idleExitMs);
+    idleTimer.unref?.();
+  }
+  server.on("connection", () => armIdleExit());
+  server.on("listening", () => armIdleExit());
 
   // Without its app-server the broker can accept connections but never serve them; exit so the
   // next caller sees a dead endpoint and starts a healthy broker instead of wedging on this one.
