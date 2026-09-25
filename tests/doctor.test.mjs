@@ -169,6 +169,77 @@ test("an orphan worktree directory is reported without changing it", async () =>
   assert.deepEqual(snapshotTree(ctx.stateDir), before);
 }));
 
+test("a young retained worktree is listed as OK without counting symlinked dependencies", async () => withWorkspace(async (ctx) => {
+  const now = Date.parse("2026-09-24T12:00:00.000Z");
+  writeState(ctx.stateDir);
+  const worktree = path.join(ctx.stateDir, "worktrees", "young-retained");
+  const dependencies = makeTempDir("codex-doctor-dependencies-");
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.writeFileSync(path.join(worktree, "artifact.txt"), "small\n", "utf8");
+  fs.writeFileSync(path.join(dependencies, "large-package.bin"), Buffer.alloc(128 * 1024));
+  fs.symlinkSync(dependencies, path.join(worktree, "node_modules"), "dir");
+  fs.mkdirSync(path.join(ctx.stateDir, "tickets"), { recursive: true });
+  fs.writeFileSync(
+    path.join(ctx.stateDir, "tickets", "young-retained.json"),
+    JSON.stringify({
+      id: "young-retained",
+      state: "rejected",
+      closedAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+      workdir: worktree,
+      worktree: { path: worktree, linked: ["node_modules"] }
+    }),
+    "utf8"
+  );
+
+  const before = snapshotTree(ctx.stateDir);
+  const report = await doctor(ctx, { now });
+  const retained = finding(report, "retained-closed-worktrees");
+
+  assert.equal(retained.status, "OK");
+  assert.equal(retained.data.tickets.length, 1);
+  assert.deepEqual(retained.data.tickets[0], {
+    id: "young-retained",
+    state: "rejected",
+    path: worktree,
+    closedAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+    ageMs: 24 * 60 * 60 * 1000,
+    sizeBytes: 6
+  });
+  assert.match(retained.summary, /young-retained \(rejected, 24h 0m, 6 B\)/);
+  assert.match(retained.fix, /close young-retained --purge/);
+  assert.deepEqual(snapshotTree(ctx.stateDir), before);
+}));
+
+test("a retained worktree older than 14 days is a warning", async () => withWorkspace(async (ctx) => {
+  const now = Date.parse("2026-09-24T12:00:00.000Z");
+  writeState(ctx.stateDir);
+  const worktree = path.join(ctx.stateDir, "worktrees", "old-retained");
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.writeFileSync(path.join(worktree, "artifact.txt"), "old\n", "utf8");
+  fs.mkdirSync(path.join(ctx.stateDir, "tickets"), { recursive: true });
+  fs.writeFileSync(
+    path.join(ctx.stateDir, "tickets", "old-retained.json"),
+    JSON.stringify({
+      id: "old-retained",
+      state: "abandoned",
+      closedAt: new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString(),
+      workdir: worktree,
+      worktree: { path: worktree }
+    }),
+    "utf8"
+  );
+
+  const report = await doctor(ctx, { now });
+  const retained = finding(report, "retained-closed-worktrees");
+
+  assert.equal(report.ok, true);
+  assert.equal(retained.status, "WARN");
+  assert.equal(retained.data.tickets[0].ageMs, 15 * 24 * 60 * 60 * 1000);
+  assert.equal(retained.data.tickets[0].sizeBytes, 4);
+  assert.match(retained.summary, /old-retained \(abandoned, 360h 0m, 4 B\)/);
+  assert.match(retained.fix, /close old-retained --purge/);
+}));
+
 test("dead broker metadata is reported as stale after a connection-only probe", async () => withWorkspace(async (ctx) => {
   writeState(ctx.stateDir);
   const broker = {

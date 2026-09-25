@@ -259,12 +259,36 @@ function renderReportDetails(lines, report) {
 }
 
 export function renderTicketDetail(ticket, job, payload, { companion }) {
+  if (!job) {
+    const lines = [
+      `# Codex ticket ${ticket.id} — turn ${ticket.turns?.length ?? 0}: ${describeOutcome(ticket.lastOutcome)}`,
+      describeWhere(ticket)
+    ];
+    if (ticket.lastSummary) {
+      lines.push(`Summary: ${ticket.lastSummary}`);
+    }
+    lines.push("Turn details (report, evidence, and command trace) were pruned from job history, which keeps the newest 50 jobs.");
+    if (!["accepted", "rejected", "abandoned"].includes(ticket.state)) {
+      lines.push("Next:");
+      for (const step of suggestNextSteps(ticket, ticket.lastOutcome, companion)) {
+        lines.push(`- ${step}`);
+      }
+    }
+    lines.push("", "Ticket:");
+    renderTicketRecord(lines, ticket);
+    return `${lines.join("\n")}\n`;
+  }
   const lines = [renderTurnCard(ticket, job, payload, { companion }).trimEnd()];
   renderReportDetails(lines, payload?.report ?? null);
   if (!payload?.report && payload?.rawOutput) {
     lines.push("", "Final message:", payload.rawOutput.trim());
   }
   lines.push("", "Ticket:");
+  renderTicketRecord(lines, ticket);
+  return `${lines.join("\n")}\n`;
+}
+
+function renderTicketRecord(lines, ticket) {
   lines.push(`- State: ${ticket.state}; turns: ${ticket.turns?.length ?? 0}; thread: ${ticket.threadId ?? "not started"}`);
   lines.push(`- Workdir: ${ticket.workdir}`);
   if (ticket.threadId) {
@@ -277,7 +301,6 @@ export function renderTicketDetail(ticket, job, payload, { companion }) {
     lines.push(`- Decision ${decision.at}: ${decision.action}${decision.reason ? ` — ${decision.reason}` : ""}`);
   }
   lines.push(`- Brief: ${shorten(ticket.brief, 300)}`);
-  return `${lines.join("\n")}\n`;
 }
 
 export function renderCommandTrace(commands) {

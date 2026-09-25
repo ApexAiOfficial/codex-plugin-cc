@@ -17,6 +17,7 @@ import { LAUNCH_GRACE_MS, readJobHeartbeatAgeMs } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STALE_HEARTBEAT_MS = 90000;
+const OLD_RETAINED_WORKTREE_MS = 14 * 24 * 60 * 60 * 1000;
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const BROKER_COMMAND_HINT = "app-server-broker.mjs";
 const TICKET_REF_PREFIX = "refs/codex-companion/tickets/";
@@ -53,6 +54,46 @@ function formatDuration(milliseconds) {
   }
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+function formatSize(bytes) {
+  if (!Number.isFinite(bytes)) {
+    return "unknown size";
+  }
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? value : value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+/** Apparent file size below `root`, excluding symlinks and never traversing their targets. */
+function directorySize(root) {
+  let bytes = 0;
+  const pending = [root];
+  while (pending.length) {
+    const current = pending.pop();
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      for (const entry of listDirectory(current)) {
+        pending.push(path.join(current, entry.name));
+      }
+    } else if (stat.isFile()) {
+      bytes += stat.size;
+    }
+  }
+  return bytes;
 }
 
 function readJson(filePath) {
@@ -579,6 +620,17 @@ export async function collectDoctorReport(cwd, options = {}) {
   const refs = refList.status === 0 && !refList.error ? refList.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
   const closedIds = new Set(allTickets.filter((ticket) => CLOSED_TICKET_STATES.has(ticket.state)).map((ticket) => ticket.id));
   const closedRefs = refs.filter((ref) => closedIds.has(ref.slice(TICKET_REF_PREFIX.length).split("/")[0]));
+  const retainedClosed = recorded
+    .filter((entry) => CLOSED_TICKET_STATES.has(entry.ticket.state) && fs.existsSync(entry.path))
+    .map((entry) => ({
+      id: entry.ticket.id,
+      state: entry.ticket.state,
+      path: entry.path,
+      closedAt: entry.ticket.closedAt ?? null,
+      ageMs: ageMs(entry.ticket.closedAt, now),
+      sizeBytes: directorySize(entry.path)
+    }));
+  const oldRetained = retainedClosed.filter((entry) => entry.ageMs != null && entry.ageMs > OLD_RETAINED_WORKTREE_MS);
 
   report.add(
     missingRecorded.length ? "FAIL" : "OK",
@@ -595,6 +647,17 @@ export async function collectDoctorReport(cwd, options = {}) {
     orphanDirectories.length ? `Unrecorded directories exist under the worktree state root: ${orphanDirectories.join(", ")}.` : "No orphan worktree directories were found.",
     orphanDirectories.length ? "Inspect each directory, then remove it with git worktree remove or a filesystem command if it is not registered." : "No action needed.",
     { paths: orphanDirectories }
+  );
+  report.add(
+    oldRetained.length ? "WARN" : "OK",
+    "retained-closed-worktrees",
+    retainedClosed.length
+      ? `Retained worktrees for closed tickets: ${retainedClosed.map((entry) => `${entry.id} (${entry.state}, ${formatDuration(entry.ageMs)}, ${formatSize(entry.sizeBytes)})`).join(", ")}.`
+      : "No retained worktrees for closed tickets.",
+    retainedClosed.length
+      ? `Remove when no longer needed with ${retainedClosed.map((entry) => `close ${entry.id} --purge`).join("; ")}.`
+      : "No action needed.",
+    { tickets: retainedClosed }
   );
   if (worktreeList.status !== 0 || worktreeList.error) {
     report.add("WARN", "registered-worktrees", `git worktree list could not run: ${firstLine(worktreeList.stderr || worktreeList.error?.message || "unknown error")}.`, "Run doctor from a valid Git repository with Git installed.");

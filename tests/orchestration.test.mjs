@@ -189,6 +189,87 @@ test("a shared ticket records evidence, attributes changes, and passes independe
   assert.equal(companionJson(["tickets"], { cwd: ctx.repo, env: ctx.env }).tickets.length, 0);
 });
 
+test("show falls back to durable ticket history when job details were pruned", () => {
+  const ctx = setupRepo();
+  delegateAndWait(ctx, ["--ticket", "old", "Finish old work."]);
+  const ticket = readTicketRecord(ctx.repo, "old");
+  const jobFile = resolveJobFile(ctx.repo, ticket.lastJobId);
+  fs.rmSync(jobFile);
+
+  const open = companion(["show", "old"], { cwd: ctx.repo, env: ctx.env });
+  assert.equal(open.status, 0, open.stderr);
+  assert.match(open.stdout, /turn 1: completed/);
+  assert.match(open.stdout, new RegExp(`Summary: ${ticket.lastSummary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(open.stdout, /Turn details .* were pruned from job history, which keeps the newest 50 jobs/);
+  assert.match(open.stdout, /followup old/);
+
+  for (const args of [["show", "old", "--commands"], ["show", "old", "--command", "1"]]) {
+    const trace = companion(args, { cwd: ctx.repo, env: ctx.env });
+    assert.equal(trace.status, 0, trace.stderr);
+    assert.match(trace.stdout, /command trace .* was pruned from job history/);
+  }
+
+  companionJson(["close", "old", "--accepted", "--reason", "history verified"], { cwd: ctx.repo, env: ctx.env });
+  const closed = companion(["show", "old"], { cwd: ctx.repo, env: ctx.env });
+  assert.equal(closed.status, 0, closed.stderr);
+  assert.match(closed.stdout, /turn 1: completed/);
+  assert.match(closed.stdout, /State: accepted; turns: 1/);
+  assert.match(closed.stdout, /Decision .*: accepted — history verified/);
+  assert.doesNotMatch(closed.stdout, /Inspect: .*show old/);
+});
+
+test("show keeps worker-lost errors when the job exists without a result payload", () => {
+  const ctx = setupRepo();
+  const stateDir = resolveStateDir(ctx.repo);
+  const timestamp = nowStamp(-5 * 60 * 1000);
+  const job = {
+    id: "ticket-worker-lost",
+    status: "failed",
+    failureKind: "worker-lost",
+    errorMessage: "The delegated worker exited before producing a result.",
+    result: null,
+    kind: "ticket",
+    jobClass: "task",
+    ticketId: "worker-lost",
+    createdAt: timestamp,
+    completedAt: timestamp
+  };
+  const ticket = {
+    version: 1,
+    id: "worker-lost",
+    role: "implement",
+    title: "Worker lost",
+    brief: "Exercise missing turn payload handling.",
+    state: "needs-review",
+    lastJobId: job.id,
+    lastOutcome: "worker-lost",
+    lastSummary: job.errorMessage,
+    workdir: ctx.repo,
+    isolation: "shared",
+    sandbox: { write: true, network: false },
+    turns: [{ turn: 1, jobId: job.id, outcome: "worker-lost", completedAt: timestamp }],
+    decisions: [],
+    verifications: [],
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+  fs.mkdirSync(path.join(stateDir, "jobs"), { recursive: true });
+  fs.mkdirSync(path.join(stateDir, "tickets"), { recursive: true });
+  fs.writeFileSync(resolveJobFile(ctx.repo, job.id), JSON.stringify(job), "utf8");
+  fs.writeFileSync(resolveTicketFile(ctx.repo, ticket.id), JSON.stringify(ticket), "utf8");
+
+  const shown = companion(["show", ticket.id], { cwd: ctx.repo, env: ctx.env });
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.match(shown.stdout, /worker process died without a result/);
+  assert.match(shown.stdout, /Error: The delegated worker exited before producing a result\./);
+  assert.doesNotMatch(shown.stdout, /pruned from job history/);
+
+  const commands = companion(["show", ticket.id, "--commands"], { cwd: ctx.repo, env: ctx.env });
+  assert.equal(commands.status, 0, commands.stderr);
+  assert.match(commands.stdout, /No commands were recorded for this turn/);
+  assert.doesNotMatch(commands.stdout, /pruned from job history/);
+});
+
 test("ownership violations and contradicted verification claims are flagged", () => {
   const ctx = setupRepo();
   const { waited } = delegateAndWait(ctx, [
@@ -430,6 +511,10 @@ test("worktree integration aborts atomically on conflicting edits and merges cle
   assert.equal(fs.existsSync(record.workdir), true, "rejected tickets keep their worktree");
   companionJson(["close", "clash", "--purge"], { cwd: ctx.repo, env: ctx.env });
   assert.equal(fs.existsSync(record.workdir), false);
+  const alreadyPurged = companion(["close", "clash", "--purge"], { cwd: ctx.repo, env: ctx.env });
+  assert.equal(alreadyPurged.status, 0, alreadyPurged.stderr);
+  assert.match(alreadyPurged.stdout, /No retained worktree for clash/);
+  assert.equal(companionJson(["close", "clash", "--purge"], { cwd: ctx.repo, env: ctx.env }).purged, false);
 });
 
 // ------------------------------------------------------------------------------------------

@@ -862,7 +862,13 @@ async function handleShow(argv, ctx) {
     output({ ticketId: ticket.id, jobId, prompt: job?.prompt ?? null }, `${job?.prompt ?? "The prompt has not been assembled yet."}\n`, options.json);
     return;
   }
+  const tracePruned = !job;
+  const prunedTraceMessage = "The command trace for this turn was pruned from job history, which keeps the newest 50 jobs.\n";
   if (options.command) {
+    if (tracePruned) {
+      output({ ticketId: ticket.id, jobId, command: null, tracePruned: true }, prunedTraceMessage, options.json);
+      return;
+    }
     const entry = readTraceEntry(workspaceRoot, jobId, Number(options.command));
     if (!entry) {
       throw new Error(`No command #${options.command} was recorded for this turn.`);
@@ -871,6 +877,10 @@ async function handleShow(argv, ctx) {
     return;
   }
   if (options.commands) {
+    if (tracePruned) {
+      output({ ticketId: ticket.id, jobId, commands: [], tracePruned: true }, prunedTraceMessage, options.json);
+      return;
+    }
     const commands = job?.result?.commands ?? [];
     output({ ticketId: ticket.id, jobId, commands }, renderCommandTrace(commands), options.json);
     return;
@@ -1079,13 +1089,18 @@ function closeTicket(workspaceRoot, ticket, options) {
     if (!options.purge) {
       throw new Error(`Ticket ${ticket.id} is already ${ticket.state}. Pass --purge to remove its retained worktree.`);
     }
-    if (ticket.worktree && !ticket.worktree.removedAt) {
+    const purged = Boolean(ticket.worktree && !ticket.worktree.removedAt);
+    if (purged) {
       removeTicketWorktree({ repoRoot: workspaceRoot, worktree: ticket.worktree, ticketId: ticket.id, worktreesRoot });
       updateTicket(workspaceRoot, ticket.id, (record) => {
         record.worktree.removedAt = nowIso();
       });
     }
-    output({ ticketId: ticket.id, purged: true }, `Removed the retained worktree for ${ticket.id}.\n`, options.json);
+    output(
+      { ticketId: ticket.id, purged },
+      purged ? `Removed the retained worktree for ${ticket.id}.\n` : `No retained worktree for ${ticket.id}.\n`,
+      options.json
+    );
     return;
   }
   if (decisions.length !== 1) {
