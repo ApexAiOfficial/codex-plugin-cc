@@ -82,9 +82,9 @@ Classification of the 100-item orchestration idea bank against what the fork act
 | 85–86 | Upstream-compatible boundary; modular components | Adopted | Orchestration in separate modules; substrate fixes minimal |
 | 87 | Experimental feature flags | Unnecessary so far | The monitor starts only on skill use; behavior knobs are env vars |
 | 88 | Stock-path fallback | Adopted | Stock commands keep working unchanged |
-| 89 | Runtime health diagnostics | In progress | `doctor` (roadmap 2) |
+| 89 | Runtime health diagnostics | Adopted | `doctor` / `/codex:doctor` (read-only, pressure-tested) |
 | 90 | Benchmark suite | Deferred | After metrics exist |
-| 91 | Resource-pressure awareness | Deferred | Linux `/proc/pressure` candidate (roadmap 5) |
+| 91 | Resource-pressure awareness | Deferred | Linux PSI judged an optimization, not a correctness need |
 | 92 | Rate-limit / quota awareness | Adopted | `quota` outcome; the thread persists for a later followup |
 | 93 | Fair worker scheduling | Unnecessary | At most 3 concurrent tickets |
 | 94 | Speculative work with cancellation | Adopted | `cancel` plus guidance |

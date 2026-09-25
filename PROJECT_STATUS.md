@@ -57,20 +57,19 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
   - retry-aware turn errors
 - Ticket continuity when a Codex thread cannot be resumed: a fresh thread with a handoff of earlier turns (recorded in `threadHistory`), plus `CODEX_COMPANION_CODEX_BIN`.
 - Worktree integration is symlink-safe and transactional: journaled, rolled back on failure, and recovered after a crash without overwriting lead edits made since.
+- `doctor` / `/codex:doctor`: a read-only runtime health diagnostic (the only new public command).
+- Stale-lock recovery serialized through a recovery gate. This fixes a reproduced race that admitted multiple lock holders.
+- Linux is the reference platform (decision from the `linux-platform` investigation): capability-detected enhancements with portable fallbacks.
 
 ## Incomplete / next
 
 The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open items include:
-- README and CHANGELOG coverage of the fork's public behavior
-- a runtime health diagnostic (`/codex:doctor`)
-- `RUNBOOK.md` with pressure-tested recovery procedures
+- More `RUNBOOK.md` drills (broker death and busy-SessionEnd on real processes)
+- Linux tier: `flock(1)`-backed state locks and cgroup/systemd containment of worker process trees
 - observing the monitor, SessionStart ledger, and Stop nudge live in an interactive session
-- evaluating Linux as the reference platform
 - retention of closed tickets
-- type-checking the new modules
 - model discovery (#638)
 - delegation metrics
-- classification of the 100-item idea bank
 
 ## Key design decisions
 
@@ -97,7 +96,7 @@ The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open 
 ## Validation status
 
 At the most recent commit on `orchestration` (see `CHECKPOINT_HANDOFF.md` for the exact SHA and results):
-- `npm test`: 164 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
+- `npm test`: 175 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
 - `npm run build` (tsc check): passes.
 - A full test run leaves no stray processes. The harness stops brokers on exit and on signals.
 - Dogfooded against real Codex CLI 0.144.1 with 5 tickets: 1 review, 3 implement, and 1 implement that went through two rejection→followup cycles. The dogfood covered integrate, verify, a monitor notification, the resume fallback, and close/purge. Every accepted change passed independent verification outside the sandbox.
