@@ -1,65 +1,68 @@
 # Checkpoint handoff
 
-Operational recovery notes. This file is overwritten at each safe checkpoint; git history keeps the earlier versions. For architecture and rationale, see `PROJECT_STATUS.md`.
+Operational recovery notes. This file is overwritten at each safe checkpoint; git history keeps the earlier versions. `PROJECT_STATUS.md` describes the system, and `UPSTREAM_AUDIT.md` holds the upstream defect evidence.
 
-## Current checkpoint — 2026-09-24
+## Current checkpoint — 2026-09-25
 
-- Branch: `orchestration`, pushed to `origin` (ApexAiOfficial/codex-plugin-cc). `main` is untouched and equals upstream `db52e28`.
-- Code checkpoint commit: `748cc16`. This handoff is committed immediately on top of it.
-- Working tree: clean apart from this file at the time of writing. No intentional uncommitted work.
+- Branch `orchestration`, pushed to `origin` (ApexAiOfficial/codex-plugin-cc). `main` is untouched and equals upstream `db52e28`.
+- Code checkpoint: `ad935c8`. The docs commit containing this file sits on top of it.
+- Working tree: clean. No active Codex tickets, jobs, workers, ticket worktrees, or `refs/codex-companion/*` refs (all dogfood tickets are closed with decision records).
+- Validation at `ad935c8`: `npm test` 164/164, `npm run build` (tsc) clean, no stray broker/app-server/worker processes after a full run.
 
-### Completed (all on `orchestration`)
+### Completed since the last handoff (`748cc16`)
 
-1. `dd963e0`: durable tickets, concurrency-safe state, evidence, isolation, steering, the delegation skill, monitor, and hooks.
-2. `084b6f8`: test harness no longer leaks detached brokers (this caused memory exhaustion and a machine freeze during repeated test runs); typecheck fix.
-3. `edcb5b0`: fixes found by real-sandbox dogfooding (tool probing under EPERM, scratch worktrees for investigate/review, direct-only preflight).
-4. `748cc16`: `PROJECT_STATUS.md`; overlap prediction skips scratch tickets.
+- The first full dogfood cycle on real Codex 0.144.1, with 5 tickets. `unit-tests` found 3 real library bugs. `review-core` found 6 real defects, all fixed. `fix-integration` and `stock-fixes` were implemented by Codex, returned with evidence, and accepted after independent verification.
+- An upstream audit of 17+ items; every disposition is in `UPSTREAM_AUDIT.md` with evidence. Substrate hardening landed in `a17c2d7`, `983435f`, `3476adc`, and `ad935c8`.
+- A resume fallback for Codex threads that cannot be resumed (version skew between the CLI 0.144.1 and the desktop app's 0.155 sharing `~/.codex`). It was exercised on real Codex, and the continued turn's work was accepted.
 
-### Tests and checks at `748cc16`
+### Dogfood environment
 
-- `npm test`: 112/112 pass (about 80s). `node --test tests/orchestration.test.mjs`: 21/21.
-- `npm run build`: passes.
-- No stray processes after a full run (`ps -eo cmd | grep -E 'app-server-broker.mjs|codex-plugin-test'`).
-- Real Codex 0.144.1 preflight on this repo: tools runnable in the sandbox; limitations are network and Docker daemon only.
-
-### In progress: live Codex dogfood tickets
-
-These tickets ran through the fork's runtime with a separate data dir, `CLAUDE_PLUGIN_DATA=$HOME/.cache/codex-companion-fork`. The separate dir keeps the upstream plugin active in the lead's session from touching them.
-
-| Ticket | Role / isolation | Job | Codex thread | Worktree |
-| --- | --- | --- | --- | --- |
-| `review-core` | review, scratch worktree | `ticket-mug34bot-7gvqig` | `01a0d577-b8d8-7a21-a0c2-df80892d2098` | `~/.cache/codex-companion-fork/state/codex-plugin-cc-d975f0e6e69b7c55/worktrees/review-core` |
-| `unit-tests` | implement, worktree; owns `tests/orchestration-units.test.mjs` | `ticket-mug34c9l-p68vqa` | `01a0d577-bf41-72d1-9b6e-4fcdc2d0f0dd` | `…/worktrees/unit-tests` |
-
-Inspect them with:
+Run the fork's runtime with its own data dir, so the installed upstream plugin (active in normal Claude sessions) cannot touch fork tickets:
 
 ```bash
 export CLAUDE_PLUGIN_DATA="$HOME/.cache/codex-companion-fork"
-node plugins/codex/scripts/codex-companion.mjs tickets --all
-node plugins/codex/scripts/codex-companion.mjs show review-core
+export CODEX_COMPANION="$PWD/plugins/codex/scripts/codex-companion.mjs"
+node "$CODEX_COMPANION" tickets --all
 ```
 
-### Next
+## Roadmap (reconciled 2026-09-25)
 
-1. Review `review-core` findings; fix whatever is confirmed (Claude owns the fixes).
-2. `verify unit-tests`, read its diff in the worktree, `integrate unit-tests`, run `npm test`, then close both tickets with reasons.
-3. Record the dogfood observations in `PROJECT_STATUS.md`.
-4. Exercise the fork as the active plugin (`claude --plugin-dir plugins/codex`) to observe the monitor, SessionStart ledger, and Stop nudge live.
+These sources were reconciled: the pre-audit plan (`PROJECT_STATUS.md` at `748cc16` and this file's "Next" at that checkpoint), the original request to classify the 100-item idea bank, the upstream audit, dogfood findings, and the roadmap items added on 2026-09-25 (Linux reference platform, human-facing commands, RUNBOOK). The work is ordered by dependency and risk.
 
-### Do not destroy
+| # | Item | Why now / dependency | Lane |
+| --- | --- | --- | --- |
+| 1 | README + CHANGELOG for the fork's public behavior (durable jobs, SessionEnd change, tickets via skill, new env vars) | Public behavior changed without docs; overdue | Claude |
+| 2 | `doctor` diagnostic (companion subcommand plus `/codex:doctor`): Codex binaries/versions and skew, auth, broker health and identity, workers and heartbeats, open tickets, registered vs recorded worktrees, leftover journals/refs/locks, state integrity, platform capability (start markers) | Prerequisite for runbook procedures; also the most useful human-facing command | Codex implement ticket (new module + tests) while Claude does item 1 |
+| 3 | `RUNBOOK.md`: only procedures pressure-tested with controlled fixtures (worker death, broker death, busy broker at SessionEnd, interrupted integration, resume fallback, state corruption, rollback) | Needs `doctor`; failure injection needs the host (Codex's sandbox cannot run app-servers) | Claude |
+| 4 | Observe the monitor, SessionStart ledger, and Stop nudge live (`claude --plugin-dir plugins/codex`, and `claude -p` where headless suffices) | Only unit-tested so far | Claude, with the user for interactive checks |
+| 5 | Linux reference platform: evaluate `flock` (auto-release on death, removing stale-lock logic), pidfd (race-free signalling), inotify for `watch`, `/proc/pressure` for dispatch, child subreaper for worker trees; keep portable fallbacks | After the substrate stabilizes; no current Linux defect forces it | Codex investigate ticket (scratch worktree), then a Claude decision |
+| 6 | Classify the 100-item idea bank (already solved / adopted / adapted / rejected / deferred), with evidence | Original request; best done now that the architecture is stable | Claude |
+| 7 | Retention of closed tickets, job history, and journals (ideas 48–49) | Unbounded growth, low urgency | Codex implement |
+| 8 | Type-check the new modules (extend `tsconfig.app-server.json`) | Maintainability | Codex implement |
+| 9 | Model discovery via `model/list` (#638) and role-based model/effort guidance (ideas 50–52) | No hardcoded generations exist today | Later |
+| 10 | Delegation metrics/telemetry (ideas 79–81) | Needs real usage first | Later |
+| 11 | Route foreground `/codex:rescue` through durable jobs (#738) | The stock path is bounded by the Bash timeout | Later / optional |
+
+Public command surface: add only `/codex:doctor` for now. `/codex:status` already shows tickets. The monitor is automatic. Delegation is Claude-facing through the `codex-delegation` skill, so `/codex:tickets`, `/codex:watch`, and `/codex:delegate` would duplicate existing surfaces. Revisit `/codex:handoff` after the RUNBOOK work.
+
+## Exact next action
+
+Start item 1 (README/CHANGELOG) in Claude's lane and delegate item 2 (`doctor`) to Codex as a worktree implement ticket that owns a new `plugins/codex/scripts/lib/doctor.mjs`, `tests/doctor.test.mjs`, and `commands/doctor.md`. Then do item 3.
+
+## Do not destroy
 
 - Branch `orchestration` (local and `origin`).
-- `~/.cache/codex-companion-fork/`: fork dogfood state, including open tickets and their worktrees.
-- Refs `refs/codex-companion/tickets/*` in this repository. They pin ticket base and integration commits; `close` removes them.
-- Registered git worktrees: `git worktree list` shows the ticket worktrees. Remove them only through `close … --purge`, not `rm -rf`, which leaves stale worktree metadata.
+- `~/.cache/codex-companion-fork/`: fork dogfood state and ticket history (all tickets are closed).
+- Any `*.integration-journal` directory next to a ticket worktree. It is recovery data for an interrupted integration; `integrate` recovers it automatically.
 
-### Unresolved
+## Known issues / unresolved
 
-- The ticket record only learns its Codex thread ID when a turn finishes (the running job file has it). `show` on a running ticket should display it.
-- `~/.claude/plugins/data/codex-openai-codex/state/` holds `codex-plugin-test-*` directories written by test runs before the suite was made hermetic. They are safe to delete; they have not been deleted yet.
+- Codex CLI 0.144.1 cannot resume some threads (`paginated_threads is not supported yet`) while the desktop app's Codex 0.155 shares `~/.codex`. The fallback handles it, but the user may want to update the CLI or set `CODEX_COMPANION_CODEX_BIN`.
+- `close <ticket> --purge` on an already-closed ticket prints "Removed the retained worktree" even when nothing remained (cosmetic).
+- `~/.claude/plugins/data/codex-openai-codex/state/codex-plugin-test-*` holds stale test state from runs before the suite was made hermetic. It is safe to delete and has not been deleted yet.
 
-### Recovery
+## Recovery
 
-- Restore this checkpoint: `git fetch origin && git checkout orchestration && git reset --hard 748cc16`. `git reset --hard` discards local changes, so check `git status` first.
-- Return to upstream behavior: check out `main`. The installed marketplace plugin (`codex@openai-codex` 1.0.6) is upstream and unaffected by this branch.
-- Stuck ticket: `cancel <ticket>` interrupts it gracefully, then kills the identity-checked process. A dead worker is reconciled automatically as `worker-lost`, and `followup <ticket>` continues the same thread.
+- Restore this checkpoint: `git fetch origin && git checkout orchestration && git reset --hard ad935c8`. Check `git status` first, since the reset discards local changes.
+- Return to upstream behavior: check out `main`. The installed marketplace plugin (`codex@openai-codex` 1.0.6) is upstream and unaffected.
+- Stray processes after an interrupted test run: `ps -eo pid,cmd | grep -E 'app-server-broker.mjs serve|codex-plugin-test'`, then kill those pids. These are test-only processes in temp dirs.

@@ -49,15 +49,28 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 - Sandbox preflight measured against the real sandbox, with host-vs-sandbox differences reported.
 - Concurrent ticket cap (default 3, `setup --max-parallel`) and ownership-overlap warnings at dispatch.
 - Evidence capture on turns: commands, exit codes, durations, token usage, model, subagent count.
+- Transport/broker substrate hardened against the open upstream defect backlog; see `UPSTREAM_AUDIT.md`:
+  - bounded RPCs, and a turn watchdog that probes `thread/read` instead of timing out on silence
+  - zombie-broker exit, thread unsubscribe on disconnect, serialized broker acquisition that never kills a live broker
+  - busy-aware SessionEnd shutdown and broker idle exit
+  - an explicit per-turn sandbox policy on every turn
+  - retry-aware turn errors
+- Ticket continuity when a Codex thread cannot be resumed: a fresh thread with a handoff of earlier turns (recorded in `threadHistory`), plus `CODEX_COMPANION_CODEX_BIN`.
+- Worktree integration is symlink-safe and transactional: journaled, rolled back on failure, and recovered after a crash without overwriting lead edits made since.
 
 ## Incomplete / next
 
-- A real end-to-end run of the plugin monitor, SessionStart ledger, and Stop nudge inside an interactive Claude Code session loading this fork (`claude --plugin-dir plugins/codex`). These are unit-tested and the `watch` stream was exercised through the host Monitor tool, but the hooks have not been observed live.
-- Retention: closed tickets and their job files are never pruned; retained worktrees need `close --purge`.
-- New modules are not type-checked (`tsconfig.app-server.json` covers only the upstream protocol files).
-- Windows: process start markers are unavailable (pid-only identity), and worktree junctions are untested.
-- No productivity metrics or delegation-outcome telemetry yet (idea-bank items 79–81).
-- `/codex:rescue` still runs foreground `task` inside a subagent Bash call, which Bash's 10-minute limit can cut short. The ticket path avoids this; the stock path is unchanged.
+The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open items include:
+- README and CHANGELOG coverage of the fork's public behavior
+- a runtime health diagnostic (`/codex:doctor`)
+- `RUNBOOK.md` with pressure-tested recovery procedures
+- observing the monitor, SessionStart ledger, and Stop nudge live in an interactive session
+- evaluating Linux as the reference platform
+- retention of closed tickets
+- type-checking the new modules
+- model discovery (#638)
+- delegation metrics
+- classification of the 100-item idea bank
 
 ## Key design decisions
 
@@ -77,15 +90,17 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 - Claim cross-checking is substring heuristics over normalized command text.
 - The monitor depends on the experimental plugin-monitor feature (interactive CLI only); `wait` and the Stop nudge are the fallbacks.
 - The fork's marketplace name is still `openai-codex`, the same as upstream, so installing both through marketplaces would collide. Use `--plugin-dir` for testing.
-- Test suite runtime is about 80s, and the timing-sensitive upstream tests remain.
+- Test suite runtime is about 2.5 min, and the timing-sensitive upstream tests remain.
+- On this machine the Codex CLI (0.144.1) cannot resume some threads written alongside the desktop app's newer Codex. Tickets fall back to a fresh thread, which loses the thread's conversational context but not the code or the report handoff. Updating the CLI, or pointing `CODEX_COMPANION_CODEX_BIN` at the newer binary, avoids it.
+- A foreground `/codex:rescue` still runs inside a subagent Bash call and is bounded by its timeout.
 
 ## Validation status
 
 At the most recent commit on `orchestration` (see `CHECKPOINT_HANDOFF.md` for the exact SHA and results):
-- `npm test`: 112 tests passing (91 upstream-derived, 21 orchestration).
+- `npm test`: 164 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
 - `npm run build` (tsc check): passes.
-- A full test run leaves no stray processes. Earlier, each foreground test leaked a detached broker plus an app-server; that is fixed in `tests/helpers.mjs`.
-- Dogfooded against real Codex CLI 0.144.1 (preflight, scratch-worktree review ticket, worktree implement ticket).
+- A full test run leaves no stray processes. The harness stops brokers on exit and on signals.
+- Dogfooded against real Codex CLI 0.144.1 with 5 tickets: 1 review, 3 implement, and 1 implement that went through two rejection→followup cycles. The dogfood covered integrate, verify, a monitor notification, the resume fallback, and close/purge. Every accepted change passed independent verification outside the sandbox.
 
 ## Runtime assumptions
 
@@ -116,3 +131,6 @@ When dogfooding from a session where the upstream plugin is also installed, poin
 - The Stop hook may block once per finished, unreviewed ticket turn, before the optional review gate.
 - `thread/started` notifications that arrive before the `turn/start` response are no longer dropped. This is an upstream bug fix, a good candidate to send upstream.
 - `item/commandExecution/outputDelta` and `item/fileChange/outputDelta` notifications are opted out.
+- Broker: thread ownership/unsubscribe, exit when its child dies, `broker/shutdown {ifIdle}`, idle exit. Acquisition is lock-serialized and never kills a live broker.
+- Every `turn/start` carries an explicit `sandboxPolicy`, and RPCs are bounded (`CODEX_COMPANION_RPC_TIMEOUT_MS`).
+- `task`, `delegate`, `followup`, and `steer` stop option parsing at the first free-text token for single raw-string input.
