@@ -7,11 +7,40 @@ they already have.
 
 <video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
 
+> **About this fork.** [ApexAiOfficial/codex-plugin-cc](https://github.com/ApexAiOfficial/codex-plugin-cc), on branch `orchestration`, extends the plugin so Claude can run Codex as a durable, parallel peer engineer. It also hardens the runtime against the open upstream defect backlog. Everything below still applies; the additions are summarized in [Fork: Codex as a parallel engineer](#fork-codex-as-a-parallel-engineer). Project state: [`PROJECT_STATUS.md`](./PROJECT_STATUS.md), [`UPSTREAM_AUDIT.md`](./UPSTREAM_AUDIT.md).
+
 ## What You Get
 
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
 - `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+
+## Fork: Codex as a parallel engineer
+
+Claude stays the lead engineer. It decides when a substantial, repo-local part of a task can run in parallel, hands it to Codex as a **ticket**, keeps working, and verifies and integrates the result from evidence. You do not drive this with commands. Claude uses it through the `codex-delegation` skill, and `/codex:status` shows open tickets.
+
+- **Durable tickets.** Each ticket is a named work package bound to one persistent Codex thread, with a role (`implement`, `investigate`, `review`), declared file ownership, and acceptance checks. Workers run detached with their own Codex app-server, so they survive `/clear`, compaction, and the end of the Claude session. Their state survives restarts.
+- **Evidence over claims.** Every turn is snapshotted before and after. Claude sees which files changed, ownership violations, and whether Codex's claimed test runs match what it actually ran. Acceptance checks run independently, outside Codex's sandbox.
+- **Isolation.** A ticket edits the shared checkout (with disjoint ownership) or an isolated worktree created from your current, uncommitted state. Worktrees integrate back with a per-file three-way merge that never touches your git index, aborts atomically on conflict, and recovers safely after a crash.
+- **Honest capability routing.** Codex's sandbox has no network and a read-only `.git`. Preflight measures what it can run, and installs, network, credentials, and deployment stay with Claude.
+- **Notification instead of polling.** A plugin monitor tells Claude when a ticket turn finishes. The session start lists open tickets after compaction or a restart.
+
+Behavior changes compared with upstream:
+
+- Ending a Claude session no longer cancels or deletes Codex jobs. Background jobs finish and keep their results.
+- Every Codex turn sends an explicit sandbox policy. A resumed thread can no longer keep write access you did not ask for.
+- Hangs are bounded: JSON-RPC requests time out, and a quiet turn is checked with the app-server instead of waiting forever.
+
+Environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CODEX_COMPANION_CODEX_BIN` | `codex` | Codex executable to run, for when several installs coexist |
+| `CODEX_COMPANION_RPC_TIMEOUT_MS` | `120000` | Per-request app-server timeout (`0` disables) |
+| `CODEX_COMPANION_TURN_PROBE_MS` | `120000` | Quiet period before the turn watchdog checks on a turn |
+| `CODEX_COMPANION_BROKER_IDLE_MS` | `1800000` | Idle time after which the shared broker exits |
+
+To try the fork without replacing an installed upstream plugin, run `claude --plugin-dir /path/to/codex-plugin-cc/plugins/codex`.
 
 ## Requirements
 
