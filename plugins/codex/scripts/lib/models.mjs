@@ -41,15 +41,21 @@ export async function fetchModelCatalog(workspaceRoot, { cwd = workspaceRoot } =
     cwd,
     async (client) => {
       const models = [];
+      const cursors = new Set();
       let cursor = null;
       for (let page = 0; page < MAX_PAGES; page += 1) {
         // Hidden models are included so a valid explicit --model is never rejected.
         const response = await client.request("model/list", { includeHidden: true, ...(cursor ? { cursor } : {}) });
         models.push(...(response.data ?? []).map(summarizeModel));
         cursor = response.nextCursor ?? null;
-        if (!cursor) {
+        if (!cursor || cursors.has(cursor)) {
           break;
         }
+        cursors.add(cursor);
+      }
+      if (cursor) {
+        // A partial list would reject valid models; report discovery as unavailable instead.
+        throw new Error("model/list did not finish paging");
       }
       // Only the two fields we need: the effective config can hold credentials (MCP env, tokens).
       let configured = { model: null, effort: null };

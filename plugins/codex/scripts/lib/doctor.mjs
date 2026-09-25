@@ -142,6 +142,20 @@ function parseCodexVersion(detail) {
   return match ? { core: match.slice(1, 4).map(Number), pre: match[4] ? match[4].split(".") : [] } : null;
 }
 
+/** SemVer identifier precedence: numeric ones compare by value (exactly, via length), below alphanumeric ones, which compare in ASCII order. */
+function comparePrereleaseIdentifiers(left, right) {
+  const leftNumeric = /^\d+$/.test(left);
+  const rightNumeric = /^\d+$/.test(right);
+  if (leftNumeric && rightNumeric) {
+    const [a, b] = [left.replace(/^0+(?=\d)/, ""), right.replace(/^0+(?=\d)/, "")];
+    return a.length !== b.length ? a.length - b.length : a < b ? -1 : a > b ? 1 : 0;
+  }
+  if (leftNumeric !== rightNumeric) {
+    return leftNumeric ? -1 : 1;
+  }
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** Semver precedence: negative when `a` is older than `b`, 0 when equal. */
 function compareCodexVersions(a, b) {
   for (let index = 0; index < 3; index += 1) {
@@ -157,8 +171,7 @@ function compareCodexVersions(a, b) {
     if (left === undefined || right === undefined) {
       return left === undefined ? -1 : 1;
     }
-    const numeric = /^\d+$/.test(left) && /^\d+$/.test(right);
-    const order = numeric ? Number(left) - Number(right) : left.localeCompare(right);
+    const order = comparePrereleaseIdentifiers(left, right);
     if (order !== 0) {
       return order;
     }

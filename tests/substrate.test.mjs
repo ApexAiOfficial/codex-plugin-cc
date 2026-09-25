@@ -196,6 +196,29 @@ test("a subagent thread that starts after its parent's last client left is relea
     assert.ok(child, "the late subagent thread was released");
   }));
 
+// Regression (review finding): an orphan subagent fell back to whichever client was streaming
+// when it started, instead of being released; it stayed loaded until that unrelated client left.
+test("an orphan subagent is released even while an unrelated client is streaming", (t) =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "subagent-late" }, async () => {
+    const dir = repo();
+    const before = fake.entries().length;
+    const { session, client: first } = await brokerClient(dir, t);
+    const { thread: parent } = await first.request("thread/start", {});
+    await first.request("turn/start", { threadId: parent.id, input: [] });
+    await first.close();
+    // Another client starts streaming before the first one's subagent announces itself.
+    const second = await CodexAppServerClient.connect(dir, { brokerEndpoint: session.endpoint });
+    t.after(() => second.close().catch(() => {}));
+    const { thread: other } = await second.request("thread/start", {});
+    await second.request("turn/start", { threadId: other.id, input: [] });
+    const released = () =>
+      fake.entries().slice(before).filter((entry) => entry.method === "thread/unsubscribe").map((entry) => entry.params.threadId);
+    // Released while the second client is still connected: the parent, and its orphaned subagent.
+    const ids = await waitFor(() => (released().length >= 2 ? released() : null), { timeoutMs: 3000 });
+    assert.ok(ids.includes(parent.id), `parent released: ${ids}`);
+    assert.ok(!ids.includes(other.id), "the streaming client's own thread stays subscribed");
+  }));
+
 test("a thread shared by two clients stays subscribed until the second one leaves", (t) =>
   withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
     const dir = repo();

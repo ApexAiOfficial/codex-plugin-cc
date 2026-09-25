@@ -179,6 +179,10 @@ function readBrief(cwd, options, positionals) {
   return positionals.join(" ") || readStdinIfPiped();
 }
 
+function clearJobMark(workspaceRoot, jobId, field) {
+  updateJobFile(workspaceRoot, jobId, (job) => (job?.[field] ? { ...job, [field]: undefined } : null));
+}
+
 /** Set `field` once, under the state lock; true only for the caller that set it. */
 function markJob(workspaceRoot, jobId, field, { unless = [] } = {}) {
   if (!jobId) {
@@ -1177,33 +1181,65 @@ async function handleWatch(argv, ctx) {
   const workspaceRoot = resolveWorkspaceRoot(resolveCwd(options));
   const intervalMs = Math.max(250, Number(options["interval-ms"]) || 2000);
   const companion = companionReference(ctx.scriptPath);
-  const seen = new Map(listTickets(workspaceRoot, { includeClosed: true }).map((ticket) => [ticket.id, watchSignature(ticket)]));
+  let stdoutBroken = false;
+  process.stdout.on("error", () => {
+    stdoutBroken = true;
+  });
 
-  for (;;) {
+  // Claim, write, and give the claim back if the write fails, so a lost line is picked up by a
+  // later watcher's startup scan or by the Stop reminder. Several watchers can be armed at once
+  // (the monitor has one entry per skill-name form), and a turn Claude already saw through
+  // wait/show needs no line.
+  const announce = (ticket) => {
+    if (!markJob(workspaceRoot, ticket.lastJobId, "notifiedAt", { unless: ["collectedAt"] })) {
+      return;
+    }
+    const summary = ticket.lastSummary ? ` — ${shorten(ticket.lastSummary, 160).replace(/[.\s]+$/, "")}` : "";
+    const line = `Codex ticket ${ticket.id} finished turn ${ticket.turns?.length ?? "?"}: ${ticket.lastOutcome}${summary}. Review: node ${companion} show ${ticket.id}\n`;
+    const jobId = ticket.lastJobId;
+    process.stdout.write(line, (error) => {
+      if (error) {
+        stdoutBroken = true;
+        try {
+          clearJobMark(workspaceRoot, jobId, "notifiedAt");
+        } catch {
+          // Best effort; the watcher is exiting anyway.
+        }
+      }
+    });
+  };
+
+  // Snapshot first, then announce this session's turns that finished before the watcher armed and
+  // that nothing has surfaced yet: a turn finishing in between still differs from the snapshot.
+  const seen = new Map(listTickets(workspaceRoot, { includeClosed: true }).map((ticket) => [ticket.id, watchSignature(ticket)]));
+  try {
+    for (const { ticket } of findUnsurfacedTicketTurns(workspaceRoot, process.env[SESSION_ID_ENV] || null)) {
+      announce(ticket);
+    }
+  } catch {
+    // A transient read error must never kill the monitor.
+  }
+
+  while (!stdoutBroken) {
     try {
       reconcileWorkspace(workspaceRoot);
       for (const ticket of listTickets(workspaceRoot, { includeClosed: true })) {
         const signature = watchSignature(ticket);
-        const previous = seen.get(ticket.id);
+        if (seen.get(ticket.id) === signature) {
+          continue;
+        }
+        if (ticket.state === "needs-review" && ticket.lastJobId) {
+          announce(ticket);
+        }
+        // Only after handling it: a throw above (lock timeout, read error) retries on the next poll.
         seen.set(ticket.id, signature);
-        if (previous === signature || ticket.state !== "needs-review" || !ticket.lastJobId) {
-          continue;
-        }
-        // Claim first: several watchers can be armed at once (the monitor has one entry per skill
-        // name form), and a turn Claude already saw through wait/show needs no notification.
-        if (!markJob(workspaceRoot, ticket.lastJobId, "notifiedAt", { unless: ["collectedAt"] })) {
-          continue;
-        }
-        const summary = ticket.lastSummary ? ` — ${shorten(ticket.lastSummary, 160).replace(/[.\s]+$/, "")}` : "";
-        process.stdout.write(
-          `Codex ticket ${ticket.id} finished turn ${ticket.turns?.length ?? "?"}: ${ticket.lastOutcome}${summary}. Review: node ${companion} show ${ticket.id}\n`
-        );
       }
     } catch {
       // A transient read error must never kill the monitor.
     }
     await sleep(intervalMs);
   }
+  process.exitCode = 1;
 }
 
 // ---------------------------------------------------------------------------------------------

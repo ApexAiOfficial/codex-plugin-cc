@@ -100,6 +100,18 @@ test("an abandoned recovery gate fails closed instead of guessing", async () => 
   assert.throws(() => withFileLock(lockPath, () => "entered", { timeoutMs: 300 }), /recovery gate .*\.recover/);
 });
 
+test("a recovery gate carrying this process's recycled pid is reported as abandoned", async () => {
+  const { withFileLock } = await import(LOCKING);
+  const dir = makeTempDir();
+  const lockPath = path.join(dir, "state.lock");
+  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((resolve) => dead.on("exit", resolve));
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: dead.pid, token: "dead" }));
+  fs.writeFileSync(`${lockPath}.recover`, JSON.stringify({ pid: process.pid, marker: "linux:earlier-incarnation" }));
+
+  assert.throws(() => withFileLock(lockPath, () => "entered", { timeoutMs: 150 }), /abandoned/);
+});
+
 test("a recovery gate whose pid was recycled by another process is also reported as abandoned", async (t) => {
   const { withFileLock } = await import(LOCKING);
   const dir = makeTempDir();
@@ -112,4 +124,32 @@ test("a recovery gate whose pid was recycled by another process is also reported
   fs.writeFileSync(lockPath, JSON.stringify({ pid: dead.pid, token: "dead" }));
   fs.writeFileSync(`${lockPath}.recover`, JSON.stringify({ pid: live.pid, marker: "linux:1" }));
   assert.throws(() => withFileLock(lockPath, () => "entered", { timeoutMs: 300 }), /abandoned by an earlier process with pid/);
+});
+
+test("an unreadable marker for a live recovery-gate holder is not treated as recycled", { skip: process.platform !== "linux" }, async (t) => {
+  const { withFileLock } = await import(LOCKING);
+  const dir = makeTempDir();
+  const lockPath = path.join(dir, "state.lock");
+  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((resolve) => dead.on("exit", resolve));
+  const live = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => live.kill("SIGKILL"));
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: dead.pid, token: "dead" }));
+  fs.writeFileSync(`${lockPath}.recover`, JSON.stringify({ pid: live.pid, marker: "linux:recorded" }));
+
+  // locking.mjs has no marker-reader seam; an unreadable Linux proc stat makes the real helper return null.
+  const readFileSync = fs.readFileSync;
+  fs.readFileSync = (file, ...args) => {
+    if (file === `/proc/${live.pid}/stat`) {
+      const error = new Error("simulated unreadable process marker");
+      error.code = "EACCES";
+      throw error;
+    }
+    return readFileSync(file, ...args);
+  };
+  try {
+    assert.throws(() => withFileLock(lockPath, () => "entered", { timeoutMs: 150 }), /Timed out/);
+  } finally {
+    fs.readFileSync = readFileSync;
+  }
 });

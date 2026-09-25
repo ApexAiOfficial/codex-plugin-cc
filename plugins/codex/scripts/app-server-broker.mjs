@@ -179,10 +179,11 @@ async function main() {
   function routeNotification(message) {
     const target = activeRequestSocket ?? activeStreamSocket;
     if (message.method === "thread/started" && message.params?.thread?.id) {
-      // Subagent threads inherit their parent's owners; otherwise the socket receiving the stream.
       const threadId = message.params.thread.id;
-      const parentOwners = threadOwners.get(message.params.thread.parentThreadId ?? "");
-      const owners = parentOwners?.size ? [...parentOwners] : target ? [target] : [];
+      const parentThreadId = message.params.thread.parentThreadId ?? null;
+      // A subagent belongs to its parent's owners only, never to whichever client happens to be
+      // streaming when it starts; a top-level thread belongs to the socket receiving the stream.
+      const owners = parentThreadId ? [...(threadOwners.get(parentThreadId) ?? [])] : target ? [target] : [];
       for (const owner of owners) {
         claimThread(owner, threadId);
       }

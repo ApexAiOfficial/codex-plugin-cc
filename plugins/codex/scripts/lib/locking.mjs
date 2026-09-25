@@ -81,12 +81,16 @@ function recoverStaleLock(lockPath, staleMs) {
       throw error;
     }
     const holder = readLockOwner(gate);
-    if (holder && Number.isInteger(holder.pid) && holder.pid !== process.pid) {
-      // Abandoned: the holder is dead, or its pid now belongs to another process (e.g. after a reboot).
-      const recycled = isPidAlive(holder.pid) && holder.marker && getProcessStartMarker(holder.pid) !== holder.marker;
-      if (!isPidAlive(holder.pid) || recycled) {
+    if (holder && Number.isInteger(holder.pid)) {
+      // Abandoned: the holder is dead, or its pid now belongs to another process (for example after
+      // a reboot). Recovery is synchronous, so a gate carrying this process's own pid is never a live
+      // concurrent holder. An unreadable current marker proves nothing, so it never counts as recycled.
+      const alive = isPidAlive(holder.pid);
+      const currentMarker = alive && holder.marker ? getProcessStartMarker(holder.pid) : null;
+      const recycled = holder.pid === process.pid || Boolean(currentMarker && currentMarker !== holder.marker);
+      if (!alive || recycled) {
         throw new Error(
-          `Lock recovery gate ${gate} was abandoned by ${recycled ? "an earlier process with" : "dead"} pid ${holder.pid}; remove it once no Codex companion process is running.`
+          `Lock recovery gate ${gate} was abandoned by ${alive ? "an earlier process with" : "dead"} pid ${holder.pid}; remove it once no Codex companion process is running.`
         );
       }
     }

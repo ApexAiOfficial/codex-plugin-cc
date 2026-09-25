@@ -626,6 +626,60 @@ test("two armed watchers report a finished turn only once", async (t) => {
   assert.equal(output.trim().split("\n").length, 1, `duplicate notifications:\n${output}`);
 });
 
+function watchLines(watcher) {
+  const state = { output: "" };
+  watcher.stdout.on("data", (chunk) => {
+    state.output += chunk;
+  });
+  return state;
+}
+
+function readJobFor(repo, ticketId) {
+  const ticket = readTicketRecord(repo, ticketId);
+  return JSON.parse(fs.readFileSync(resolveJobFile(repo, ticket.activeJobId ?? ticket.lastJobId), "utf8"));
+}
+
+// Regression (review finding): watch persisted notifiedAt before writing, so a failed write lost
+// the notification for good; no other watcher or the Stop reminder would ever surface it.
+test("a notification whose write fails is released for another watcher", async (t) => {
+  const ctx = setupRepo();
+  const env = { ...ctx.env, CODEX_COMPANION_SESSION_ID: "sess-watch" };
+  const broken = spawn(process.execPath, [SCRIPT, "watch", "--interval-ms", "250"], { cwd: ctx.repo, env, stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => broken.kill("SIGKILL"));
+  broken.stdout.destroy();
+  const exited = new Promise((resolve) => broken.on("exit", resolve));
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  companionJson(["delegate", "--ticket", "lost", "Work.\nFAKE_WRITE src/l.js 1"], { cwd: ctx.repo, env });
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 20000))]);
+  assert.equal(readJobFor(ctx.repo, "lost").notifiedAt, undefined, "the failed delivery gave its claim back");
+
+  const healthy = spawn(process.execPath, [SCRIPT, "watch", "--interval-ms", "250"], { cwd: ctx.repo, env });
+  t.after(() => healthy.kill("SIGTERM"));
+  const lines = watchLines(healthy);
+  await waitFor(() => lines.output.includes("Codex ticket lost finished turn 1"), { timeoutMs: 10000 });
+});
+
+// Regression (review finding): a turn that finished before the watcher armed was treated as
+// already seen and never announced.
+test("a turn that finished before the watcher armed is announced once, for its own session only", async (t) => {
+  const ctx = setupRepo();
+  const mine = { ...ctx.env, CODEX_COMPANION_SESSION_ID: "sess-early" };
+  const other = { ...ctx.env, CODEX_COMPANION_SESSION_ID: "sess-other" };
+  companionJson(["delegate", "--ticket", "early", "Work.\nFAKE_WRITE src/e.js 1"], { cwd: ctx.repo, env: mine });
+  companionJson(["delegate", "--ticket", "elsewhere", "Work.\nFAKE_WRITE src/w.js 1"], { cwd: ctx.repo, env: other });
+  // Collected through wait: Claude has already seen this one.
+  delegateAndWait({ ...ctx, env: mine }, ["--ticket", "collected", "Work.\nFAKE_WRITE src/c.js 1"]);
+  await waitFor(() => ["early", "elsewhere"].every((id) => readJobFor(ctx.repo, id).status === "completed"));
+
+  const watcher = spawn(process.execPath, [SCRIPT, "watch", "--interval-ms", "250"], { cwd: ctx.repo, env: mine });
+  t.after(() => watcher.kill("SIGTERM"));
+  const lines = watchLines(watcher);
+  await waitFor(() => lines.output.includes("Codex ticket early finished turn 1"), { timeoutMs: 10000 });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(lines.output.trim().split("\n").length, 1, `unexpected monitor output:\n${lines.output}`);
+  assert.doesNotMatch(lines.output, /elsewhere|collected/);
+});
+
 test("watch emits one notification line per finished ticket turn", async (t) => {
   const ctx = setupRepo();
   delegateAndWait(ctx, ["--ticket", "before", "Old.\nFAKE_WRITE src/o.js 1"]);

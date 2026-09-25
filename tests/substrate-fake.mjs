@@ -81,8 +81,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         const child = "thr_" + process.pid + "_" + nextThread++;
         threads.set(child, { status: "idle", turns: [] });
         const started = () => send({ method: "thread/started", params: { thread: thread(child, { parentThreadId: threadId, agentNickname: "helper" }) } });
-        // "late": the subagent starts after the requesting client has already disconnected.
-        if (MODE === "subagent-late") setTimeout(started, 400); else started();
+        // "late": the subagent starts after the requesting client has already disconnected, while
+        // the turn is still running (so another client can be streaming by then).
+        if (MODE === "subagent-late") setTimeout(started, 700); else started();
+      }
+      if (MODE === "subagent-late") {
+        setTimeout(() => { record.status = "idle"; complete(threadId, turnId, "late subagent turn done"); }, 2000);
+        return;
       }
       if (MODE === "filechange-without-changes") {
         send({ method: "item/started", params: { threadId, turnId, item: { type: "fileChange", id: "fc", status: "inProgress" } } });
