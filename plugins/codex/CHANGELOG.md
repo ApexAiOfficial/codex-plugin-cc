@@ -22,6 +22,7 @@
 - The Stop hook's note about a running ticket no longer suggests `/codex:cancel`.
 - Fix (broker): a subagent thread that started after its parent's last client disconnected was never unsubscribed.
 - The test suite removes its temp dirs and their derived state dirs on exit; each run used to leave about 300 behind.
+- Retention visibility (Codex ticket). `show` on a ticket whose job history was pruned renders from the ticket record. `doctor` lists the worktrees kept for closed tickets, with age and size, and warns after 14 days. `close --purge` on an already-purged ticket says so.
 - Model discovery through app-server `model/list` and `config/read`, with no model call. `preflight` lists the models this account can use, their supported efforts, and the default tickets use. `delegate` and `followup` reject an unknown `--model`, or an effort that model does not support, before any turn runs. No model names are hardcoded (#638).
 
 ## 1.0.0

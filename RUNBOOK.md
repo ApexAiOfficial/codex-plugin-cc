@@ -124,6 +124,8 @@ A corrupt `state.json` is moved aside to `state.json.corrupt-<ts>` and the job i
 
 - Ticket worktrees live under the state dir's `worktrees/` and are registered with `git worktree`. Remove them only with `cx close <ticket> --purge` (rejected or abandoned tickets keep theirs), never with `rm -rf`, which leaves stale git metadata.
 - Accepting a ticket removes its worktree and its `refs/codex-companion/tickets/<id>/*` refs.
+- `cx doctor` lists the worktrees kept for rejected or abandoned tickets, with age and size, and warns after 14 days. Remove them with `cx close <id> --purge`.
+- Job history keeps the newest 50 jobs. For an older ticket, `show` renders from the ticket record (outcome, summary, decisions) and says that the turn details were pruned.
 
 ## Roll back
 
