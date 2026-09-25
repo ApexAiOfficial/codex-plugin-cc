@@ -379,3 +379,23 @@ test(
     assert.doesNotThrow(() => validateTicketId(deriveTicketId("-leading punctuation fix")));
   }
 );
+
+test("model choices are validated against the discovered catalog", async () => {
+  const { validateModelChoice } = await import("../plugins/codex/scripts/lib/models.mjs");
+  const catalog = {
+    configured: { model: "sol", effort: "high" },
+    models: [
+      { id: "astra", isDefault: true, hidden: false, efforts: ["low", "high", "ultra"] },
+      { id: "sol", isDefault: false, hidden: false, efforts: ["low", "high"] },
+      { id: "secret", isDefault: false, hidden: true, efforts: ["low"] }
+    ]
+  };
+  assert.equal(validateModelChoice(catalog, {}), null);
+  assert.equal(validateModelChoice(null, { model: "anything" }), null, "unchecked when discovery is unavailable");
+  assert.equal(validateModelChoice(catalog, { model: "astra", effort: "ultra" }), null);
+  assert.equal(validateModelChoice(catalog, { model: "secret" }), null, "a hidden model is still valid");
+  assert.match(validateModelChoice(catalog, { model: "nope" }), /does not offer model "nope".*Available: astra, sol\./);
+  // An effort alone is checked against the configured model, not the account default.
+  assert.match(validateModelChoice(catalog, { effort: "ultra" }), /Model sol does not support effort "ultra"/);
+  assert.equal(validateModelChoice({ ...catalog, configured: { model: null } }, { effort: "ultra" }), null);
+});

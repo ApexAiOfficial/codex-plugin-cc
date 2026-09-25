@@ -26,6 +26,7 @@ Fork additions, each a separate module (paths under `plugins/codex/`):
 | `scripts/lib/evidence.mjs` | Working-tree snapshots via a temporary index, tree diffs, ownership globs, verification claim cross-checks |
 | `scripts/lib/worktree.mjs` | Ticket worktrees from a snapshot of the lead's current state, per-file three-way integration, safe removal |
 | `scripts/lib/capabilities.mjs` | Sandbox preflight through app-server `command/exec` under the exact ticket policy (no model) |
+| `scripts/lib/models.mjs` | Model discovery (`model/list`, `config/read`; cached 30 min): lists models and efforts, and validates `--model`/`--effort` before a turn |
 | `scripts/lib/control-channel.mjs` | Per-job inbox relayed by the worker into `turn/steer` / `turn/interrupt` |
 | `skills/codex-delegation/` | Model-invoked skill: when to delegate and the full ticket loop (references hold the details) |
 | `monitors/monitors.json` | Plugin monitor running `watch`; starts on first use of the delegation skill |
@@ -60,6 +61,7 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 - `doctor` / `/codex:doctor`: a read-only runtime health diagnostic (the only new public command).
 - Stale-lock recovery serialized through a recovery gate. This fixes a reproduced race that admitted multiple lock holders.
 - Linux is the reference platform (decision from the `linux-platform` investigation): capability-detected enhancements with portable fallbacks.
+- Model discovery: `preflight` shows the models Codex offers and the configured default. An invalid `--model` or `--effort` is rejected before a turn is spent. No model names are hardcoded.
 - Broker lifecycle recovery drilled on real processes (`tests/drills/broker-drill.mjs`): app-server death, broker death, SessionEnd while busy, idle exit.
 - Process containment on Linux comes from Codex's own sandbox (measured, `tests/drills/sandbox-containment-drill.mjs`): bwrap's pid namespace kills everything a command started when the command ends, so the planned cgroup/systemd containment was dropped as unnecessary.
 
@@ -68,7 +70,6 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open items include:
 - a real multi-turn ticket on Codex 0.156.1 (blocked by the account usage limit on 2026-09-24)
 - retention of closed tickets
-- model discovery (#638)
 - delegation metrics
 
 ## Key design decisions
@@ -97,7 +98,7 @@ The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open 
 ## Validation status
 
 At the most recent commit on `orchestration` (see `CHECKPOINT_HANDOFF.md` for the exact SHA and results):
-- `npm test`: 181 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
+- `npm test`: 183 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
 - `npm run build` (tsc check): passes.
 - A full test run leaves no stray processes and no temp or state dirs (measured).
 - Live plugin check in an interactive Claude Code 2.1.280 session: the ledger, the Stop nudge, the monitor notification, and `/codex:doctor` all pass (`RUNBOOK.md` → "Live plugin check").

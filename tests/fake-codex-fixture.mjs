@@ -811,6 +811,14 @@ rl.on("line", (line) => {
 	        break;
 	      }
 
+	      case "model/list":
+	        send({ id: message.id, result: { nextCursor: null, data: [
+	          { id: "fake-frontier", model: "fake-frontier", description: "Fake default model.", isDefault: true, hidden: false, defaultReasoningEffort: "medium",
+	            supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }, { reasoningEffort: "high" }] },
+	          { id: "fake-hidden", model: "fake-hidden", description: "Fake hidden model.", isDefault: false, hidden: true, defaultReasoningEffort: "low",
+	            supportedReasoningEfforts: [{ reasoningEffort: "low" }] }
+	        ] } });
+	        break;
 	      default:
 	        send({ id: message.id, error: { code: -32601, message: "Unsupported method: " + message.method } });
         break;

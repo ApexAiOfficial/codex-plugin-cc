@@ -18,6 +18,7 @@ import {
 import { readStdinIfPiped } from "./fs.mjs";
 import { ensureGitRepository } from "./git.mjs";
 import { withFileLock } from "./locking.mjs";
+import { fetchModelCatalog, loadModelCatalog, renderModelCatalog, validateModelChoice } from "./models.mjs";
 import { terminateRecordedProcessTree } from "./process.mjs";
 import {
   ACTIVE_JOB_STATUSES,
@@ -603,6 +604,7 @@ async function handleDelegate(argv, ctx) {
   if (readTicket(workspaceRoot, ticketId)) {
     throw new Error(`Ticket "${ticketId}" already exists. Pick another name, or use followup to continue it.`);
   }
+  await assertModelChoice(workspaceRoot, cwd, { model: options.model ?? null, effort: options.effort ?? null });
   const owns = splitList(options.owns);
   const notes = role === "implement" && write ? predictOwnershipOverlap(workspaceRoot, owns, ticketId) : [];
   if (options.network) {
@@ -685,6 +687,10 @@ async function handleFollowup(argv, ctx) {
     ? fs.readFileSync(path.resolve(cwd, options["brief-file"]), "utf8")
     : positionals.slice(1).join(" ") || readStdinIfPiped();
   const attachVerification = !options["no-verification"] && Boolean(latestFailingVerification(ticket));
+  if (options.model || options.effort) {
+    // An effort alone is checked against the model this ticket already runs on.
+    await assertModelChoice(workspaceRoot, cwd, { model: options.model ?? ticket.model ?? null, effort: options.effort ?? null });
+  }
   const launched = withTicketOperationLock(workspaceRoot, ticket.id, () =>
     launchTicketTurn(
       workspaceRoot,
@@ -1131,7 +1137,19 @@ async function handlePreflight(argv) {
     network: Boolean(options.network),
     checks: options.check ?? []
   });
-  output(report, renderPreflight(report), options.json);
+  report.models = await fetchModelCatalog(workspaceRoot, { cwd }).catch(() => null);
+  output(report, `${renderPreflight(report)}${renderModelCatalog(report.models).join("\n")}\n`, options.json);
+}
+
+/** Reject a --model/--effort Codex does not offer before a turn is spent; unchecked if discovery is unavailable. */
+async function assertModelChoice(workspaceRoot, cwd, choice) {
+  if (!choice.model && !choice.effort) {
+    return;
+  }
+  const problem = validateModelChoice(await loadModelCatalog(workspaceRoot, { cwd }), choice);
+  if (problem) {
+    throw new Error(`${problem} Run \`preflight\` to see the models and efforts available here.`);
+  }
 }
 
 function watchSignature(ticket) {

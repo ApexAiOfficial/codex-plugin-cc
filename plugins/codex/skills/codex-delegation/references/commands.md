@@ -17,7 +17,7 @@ Create a ticket and start its first turn in a detached, durable worker. Returns 
 | `--acceptance-notes <text>` | Extra definition of done. |
 | `--network` | Grant network access to the sandbox (explicit and recorded). |
 | `--read-only` | Force a read-only implement ticket (rare). |
-| `--model <m>`, `--effort <e>` | Leave unset by default; the Codex config chooses. |
+| `--model <m>`, `--effort <e>` | Leave unset by default; the user's Codex config chooses. Both are checked against what Codex offers (`preflight` lists the models and their efforts), and an invalid choice is rejected before any turn runs. Only raise the effort for a hard or high-risk package, and name a model only when the user asks or the task clearly needs another tier. `ultra` makes Codex delegate to its own subagents and multiplies usage, so avoid it unless asked. |
 | `--title <t>` | Short title; defaults to the first line of the brief. |
 | `--brief-file <path>` / text / stdin | The brief. |
 
@@ -66,7 +66,7 @@ Graceful: interrupt the live turn through the worker (partial evidence is record
 
 ## preflight
 
-Probe the Codex sandbox with the same policy a ticket uses, via app-server `command/exec` (no model involved). Reports runnable tools, workdir and `.git` writability, network, the Docker daemon, and host-vs-sandbox differences. Flags: `--network`, `--read-only`, `--check <command>` (repeatable; runs inside the sandbox and reports exit code and output tail). The base probe is cached for 30 minutes and reused by ticket workers.
+Probe the Codex sandbox with the same policy a ticket uses, via app-server `command/exec` (no model involved). Reports runnable tools, workdir and `.git` writability, network, the Docker daemon, and host-vs-sandbox differences. Flags: `--network`, `--read-only`, `--check <command>` (repeatable; runs inside the sandbox and reports exit code and output tail). The base probe is cached for 30 minutes and reused by ticket workers. It also lists the models Codex offers this account, their supported efforts, and the model tickets use by default (from the user's Codex config).
 
 ## watch
 

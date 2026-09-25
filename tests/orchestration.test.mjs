@@ -266,6 +266,23 @@ test("investigate tickets can experiment in a scratch worktree that is never int
   assert.equal(fs.existsSync(launched.workdir), false);
 });
 
+test("an explicit model or effort Codex does not offer is rejected before any turn runs", () => {
+  const ctx = setupRepo();
+  const unknown = companion(["delegate", "--ticket", "m1", "--model", "gpt-nope", "Work."], { cwd: ctx.repo, env: ctx.env });
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /does not offer model "gpt-nope".*Available: fake-frontier\./);
+  assert.doesNotMatch(unknown.stderr, /fake-hidden/, "hidden models are not advertised");
+  const effort = companion(["delegate", "--ticket", "m2", "--model", "fake-hidden", "--effort", "high", "Work."], { cwd: ctx.repo, env: ctx.env });
+  assert.match(effort.stderr, /fake-hidden does not support effort "high"\. Supported: low\./);
+  assert.equal(fs.existsSync(resolveTicketFile(ctx.repo, "m1")), false, "no ticket is created for a rejected choice");
+  assert.equal(fs.existsSync(resolveTicketFile(ctx.repo, "m2")), false);
+  const launched = companionJson(["delegate", "--ticket", "m3", "--effort", "high", "Work."], { cwd: ctx.repo, env: ctx.env });
+  assert.equal(launched.ticketId, "m3");
+  companionJson(["wait", "m3", "--timeout-ms", "20000"], { cwd: ctx.repo, env: ctx.env });
+  const preflight = companion(["preflight"], { cwd: ctx.repo, env: ctx.env });
+  assert.match(preflight.stdout, /Models: tickets use fake-frontier \(account default\)/);
+});
+
 test("infrastructure failures are classified separately from bad work", () => {
   const ctx = setupRepo();
   const { waited } = delegateAndWait(ctx, ["--ticket", "quota", "Anything.\nFAKE_TURN_FAIL"]);

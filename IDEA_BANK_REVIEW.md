@@ -53,7 +53,7 @@ Classification of the 100-item orchestration idea bank against what the fork act
 | 47 | Failed-artifact preservation | Adopted | Rejected/abandoned tickets keep worktrees; journals are kept |
 | 48 | Success-aware cleanup | Adopted | Accepting removes the worktree and refs |
 | 49 | Retention policy | Deferred | Roadmap 7 |
-| 50–52 | Model / effort routing, escalation, discovery | Deferred | Roadmap 9 (#638); nothing is hardcoded today |
+| 50–52 | Model / effort routing, escalation, discovery | Adapted | Discovery and validation via `model/list` (`models.mjs`). Routing is skill guidance (default config; raise effort for hard packages; avoid `ultra` unless asked), not an automatic router |
 | 53 | Agent-budget accounting | Adapted | Subagent count recorded; not budgeted |
 | 54 | Native child-agent awareness | Adapted | Subagent tracking in capture and in broker ownership |
 | 55 | Recursion limits | Unnecessary | Codex's own configuration bounds its subagents; tickets cannot spawn tickets |
