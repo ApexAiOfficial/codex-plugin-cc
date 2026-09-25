@@ -206,7 +206,8 @@ function claimTurnNotification(workspaceRoot, jobId) {
   return Boolean(claimed);
 }
 
-function settleTurnNotification(workspaceRoot, jobId, delivered) {
+/** Confirm (delivered) or give back this watcher's claim; false when the write failed and should be retried. */
+export function settleTurnNotification(workspaceRoot, jobId, delivered) {
   try {
     updateJobFile(workspaceRoot, jobId, (job) => {
       if (!job?.notifyPending || job.notifyPending.pid !== process.pid) {
@@ -214,8 +215,9 @@ function settleTurnNotification(workspaceRoot, jobId, delivered) {
       }
       return delivered ? { ...job, notifyPending: undefined } : { ...job, notifiedAt: undefined, notifyPending: undefined };
     });
+    return true;
   } catch {
-    // Best effort: an unsettled claim lapses when this watcher exits.
+    return false;
   }
 }
 
@@ -1220,6 +1222,18 @@ async function handleWatch(argv, ctx) {
   process.stdout.on("error", () => {
     stdoutBroken = true;
   });
+  const unsettled = new Map();
+  const retryUnsettled = () => {
+    for (const [jobId, delivered] of unsettled) {
+      if (settleTurnNotification(workspaceRoot, jobId, delivered)) {
+        unsettled.delete(jobId);
+      }
+    }
+  };
+  process.once("SIGTERM", () => {
+    retryUnsettled();
+    process.exit(0);
+  });
 
   // Claim, write, then confirm, or give the claim back if the write fails, so a lost line is picked
   // up by a later watcher's startup scan or by the Stop reminder (see isTurnNotified). Several
@@ -1236,7 +1250,10 @@ async function handleWatch(argv, ctx) {
       if (error) {
         stdoutBroken = true;
       }
-      settleTurnNotification(workspaceRoot, jobId, !error);
+      if (!settleTurnNotification(workspaceRoot, jobId, !error)) {
+        // Retried while this watcher lives: an unconfirmed delivery would lapse at exit and repeat.
+        unsettled.set(jobId, !error);
+      }
     });
   };
 
@@ -1252,6 +1269,7 @@ async function handleWatch(argv, ctx) {
   }
 
   while (!stdoutBroken) {
+    retryUnsettled();
     try {
       reconcileWorkspace(workspaceRoot);
       for (const ticket of listTickets(workspaceRoot, { includeClosed: true })) {
@@ -1270,6 +1288,7 @@ async function handleWatch(argv, ctx) {
     }
     await sleep(intervalMs);
   }
+  retryUnsettled();
   process.exitCode = 1;
 }
 

@@ -127,6 +127,8 @@ async function main() {
       threadOwners.delete(threadId);
       try {
         await appClient.request("thread/unsubscribe", { threadId }, { timeoutMs: 30000 });
+        // Nothing more arrives for an unsubscribed thread; keep the orphan marker only on failure.
+        orphanThreads.delete(threadId);
       } catch (error) {
         process.stderr.write(`[broker] thread/unsubscribe ${threadId} failed: ${error.message}\n`);
       }
