@@ -81,13 +81,19 @@ function recoverStaleLock(lockPath, staleMs) {
       throw error;
     }
     const holder = readLockOwner(gate);
-    if (holder && Number.isInteger(holder.pid) && !isPidAlive(holder.pid)) {
-      throw new Error(`Lock recovery gate ${gate} was abandoned by dead pid ${holder.pid}; remove it once no Codex companion process is running.`);
+    if (holder && Number.isInteger(holder.pid) && holder.pid !== process.pid) {
+      // Abandoned: the holder is dead, or its pid now belongs to another process (e.g. after a reboot).
+      const recycled = isPidAlive(holder.pid) && holder.marker && getProcessStartMarker(holder.pid) !== holder.marker;
+      if (!isPidAlive(holder.pid) || recycled) {
+        throw new Error(
+          `Lock recovery gate ${gate} was abandoned by ${recycled ? "an earlier process with" : "dead"} pid ${holder.pid}; remove it once no Codex companion process is running.`
+        );
+      }
     }
     return false;
   }
   try {
-    fs.writeSync(gateFd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+    fs.writeSync(gateFd, JSON.stringify({ pid: process.pid, marker: getProcessStartMarker(process.pid), at: new Date().toISOString() }));
     if (!lockIsStale(lockPath, staleMs)) {
       return false;
     }

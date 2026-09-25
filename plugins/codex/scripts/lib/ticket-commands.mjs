@@ -1154,7 +1154,7 @@ async function handleWatch(argv, ctx) {
         if (previous === signature || ticket.state !== "needs-review" || !ticket.lastJobId) {
           continue;
         }
-        const summary = ticket.lastSummary ? ` — ${shorten(ticket.lastSummary, 160)}` : "";
+        const summary = ticket.lastSummary ? ` — ${shorten(ticket.lastSummary, 160).replace(/[.\s]+$/, "")}` : "";
         process.stdout.write(
           `Codex ticket ${ticket.id} finished turn ${ticket.turns?.length ?? "?"}: ${ticket.lastOutcome}${summary}. Review: node ${companion} show ${ticket.id}\n`
         );

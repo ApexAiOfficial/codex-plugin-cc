@@ -61,13 +61,13 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 - Stale-lock recovery serialized through a recovery gate. This fixes a reproduced race that admitted multiple lock holders.
 - Linux is the reference platform (decision from the `linux-platform` investigation): capability-detected enhancements with portable fallbacks.
 - Broker lifecycle recovery drilled on real processes (`tests/drills/broker-drill.mjs`): app-server death, broker death, SessionEnd while busy, idle exit.
+- Process containment on Linux comes from Codex's own sandbox (measured, `tests/drills/sandbox-containment-drill.mjs`): bwrap's pid namespace kills everything a command started when the command ends, so the planned cgroup/systemd containment was dropped as unnecessary.
 
 ## Incomplete / next
 
 The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open items include:
-- More `RUNBOOK.md` drills (broker death and busy-SessionEnd on real processes)
-- Linux tier: `flock(1)`-backed state locks and cgroup/systemd containment of worker process trees
-- observing the monitor, SessionStart ledger, and Stop nudge live in an interactive session
+- observing the model-facing surfaces live in an interactive session: ledger in context, Stop nudge, monitor notification, `/codex:doctor`. The SessionStart ledger output itself is verified headless under Claude Code 2.1.280.
+- a real multi-turn ticket on Codex 0.156.1 (blocked by the account usage limit on 2026-09-24)
 - retention of closed tickets
 - model discovery (#638)
 - delegation metrics
@@ -82,7 +82,8 @@ The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open 
 - **Measure, don't guess.** Preflight uses `command/exec` under the ticket's exact policy. It already caught a real sandbox quirk (spawnSync reports EPERM while succeeding).
 - **Evidence over claims.** Codex's report is informative; snapshots, ownership checks, and independent `verify` runs are authoritative.
 - **Shared isolation is the default.** It matches the lead's real environment. Worktrees are opt-in because symlinked dependencies can resolve editable installs and monorepo links to the main checkout.
-- **Minimal public surface.** No new slash commands. The model uses the runtime through one skill, and `/codex:status` shows tickets.
+- **Minimal public surface.** One new slash command (`/codex:doctor`). The model uses the runtime through one skill, and `/codex:status` shows tickets.
+- **Lock: O_EXCL plus a recovery gate, not `flock(1)`.** The current lock is proven under a 24-process stress regression. A `flock` gate would only remove the manual step after an abandoned gate, which needs a crash inside a sub-millisecond window. It would also need a gate file that is never deleted, which conflicts with the portable fallback. Revisit only if an abandoned gate is ever observed.
 
 ## Known limitations / technical debt
 

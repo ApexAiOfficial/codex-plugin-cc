@@ -493,6 +493,7 @@ test("watch emits one notification line per finished ticket turn", async (t) => 
   await new Promise((resolve) => setTimeout(resolve, 600));
   assert.equal(output.trim().split("\n").length, 1, `unexpected monitor output:\n${output}`);
   assert.doesNotMatch(output, /ticket before/);
+  assert.doesNotMatch(output, /\.\. Review/, "a summary ending in a period gets no second period");
   const ticket = readTicketRecord(ctx.repo, "after");
   assert.ok(JSON.parse(fs.readFileSync(resolveJobFile(ctx.repo, ticket.lastJobId), "utf8")).notifiedAt);
 });
