@@ -48,4 +48,7 @@ This audit checks open issues and PRs on [openai/codex-plugin-cc](https://github
 | Same-process async lock holders broke each other's lock | Async holders tracked in-process. | `a17c2d7` |
 | Stale-lock recovery admitted several holders at once (reproduced by the `linux-platform` ticket: up to 14 of 32 processes) | Recovery serialized through a `.recover` gate with a re-check; an abandoned gate fails closed; deterministic regression test | `bbc7640` |
 | Claim checks flagged honest failed-then-rerun claims | A claim is consistent if any matching run agrees. | `f269ceb` |
-| A ticket turn stopped by usage limits recorded no `errorMessage`, and its card hid Codex's reset time (observed on a real quota hit) | Codex's error text is persisted on the job and shown on the card | this checkpoint |
+| A ticket turn stopped by usage limits recorded no `errorMessage`, and its card hid Codex's reset time (observed on a real quota hit) | Codex's error text is persisted on the job and shown on the card | `ec5025d` |
+| Ticket monitor never armed: `on-skill-invoke` matches the dispatched, plugin-namespaced skill name exactly (found by the interactive live check) | Both name forms are registered, and `watch` claims notifications so watchers never double-notify | `54f68d3` |
+| Broker leaked a subagent thread whose `thread/started` arrived after its parent's last client disconnected (the "flaky" broker test; recurred under load) | An unowned new thread is released immediately; a deterministic late-subagent test fails on the old code | this checkpoint |
+| Test suite leaked about 300 temp and state dirs per run | Temp dirs and their state dirs are removed on exit | this checkpoint |

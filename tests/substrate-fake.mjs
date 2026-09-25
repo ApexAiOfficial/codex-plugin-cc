@@ -77,10 +77,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       record.status = "active";
       send({ id: message.id, result: { turn: turn(turnId) } });
       send({ method: "turn/started", params: { threadId, turn: turn(turnId) } });
-      if (MODE === "subagent") {
+      if (MODE === "subagent" || MODE === "subagent-late") {
         const child = "thr_" + process.pid + "_" + nextThread++;
         threads.set(child, { status: "idle", turns: [] });
-        send({ method: "thread/started", params: { thread: thread(child, { parentThreadId: threadId, agentNickname: "helper" }) } });
+        const started = () => send({ method: "thread/started", params: { thread: thread(child, { parentThreadId: threadId, agentNickname: "helper" }) } });
+        // "late": the subagent starts after the requesting client has already disconnected.
+        if (MODE === "subagent-late") setTimeout(started, 400); else started();
       }
       if (MODE === "filechange-without-changes") {
         send({ method: "item/started", params: { threadId, turnId, item: { type: "fileChange", id: "fc", status: "inProgress" } } });
