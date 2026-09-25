@@ -24,10 +24,15 @@ Operational recovery notes. This file is overwritten at each safe checkpoint; gi
 
 ## Next-work order (start at the top)
 
-1. **Real multi-turn ticket on Codex 0.156.1, after 23:10 EDT.** Use it for real work: retention (item 2) as a two-turn implement ticket whose second turn depends on the first. Confirm that the `threadId` is unchanged and there is no `threadHistory` reset.
-2. **Retention** of closed tickets, job history, and journals (ideas 48–49).
-3. **Delegation metrics** (ideas 79–81), only after real usage.
-4. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
+1. **At 23:10 EDT, when the Codex limit resets, two parallel tickets on real Codex 0.156.1.** The briefs are in the session scratchpad; recreate them from this list if lost.
+   - `retention` (implement, **worktree**, two turns). Retention is measured as mostly bounded: jobs are capped at 50 with their files, journals are removed after integrate, and ticket records are a few KB. The ticket covers the three remaining gaps:
+     - `show` on a ticket whose job was pruned renders "turn 1: unknown" and a self-referential next step (reproduced)
+     - `doctor` should list retained worktrees of closed tickets, with age and size (WARN after 14 days)
+     - `close --purge` on an already-purged ticket
+   - The second turn is a `followup` on the same thread. That is the real multi-turn continuity check: the `threadId` is unchanged, there is no `threadHistory` reset, and `thread/read` shows 2 turns. Then `verify` → `integrate` → commit.
+   - `review-today` (review, scratch worktree): an adversarial review of the lead's unreviewed changes `a7908ae..e76bf8a` (the `watch` claim, the broker's ownerless-thread release, the gate marker, model validation, `doctor` direction, test cleanup).
+2. **Delegation metrics** (ideas 79–81), only after real usage.
+3. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
 
 ## Exact first action after compaction
 
