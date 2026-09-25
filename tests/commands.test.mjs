@@ -75,6 +75,7 @@ test("continue is not exposed as a user-facing command", () => {
   assert.deepEqual(commandFiles, [
     "adversarial-review.md",
     "cancel.md",
+    "doctor.md",
     "rescue.md",
     "result.md",
     "review.md",
@@ -82,6 +83,14 @@ test("continue is not exposed as a user-facing command", () => {
     "status.md",
     "transfer.md"
   ]);
+});
+
+test("doctor command is a deterministic read-only runtime entrypoint", () => {
+  const doctor = read("commands/doctor.md");
+  assert.match(doctor, /disable-model-invocation:\s*true/);
+  assert.match(doctor, /allowed-tools:\s*Bash\(node:\*\)/);
+  assert.match(doctor, /codex-companion\.mjs" doctor "\$ARGUMENTS"/);
+  assert.match(doctor, /Preserve every OK, WARN, FAIL, and fix hint exactly as reported/i);
 });
 
 test("rescue command absorbs continue semantics", () => {
