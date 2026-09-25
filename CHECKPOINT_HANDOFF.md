@@ -5,8 +5,11 @@ Operational recovery notes. This file is overwritten at each safe checkpoint; gi
 ## Current checkpoint — 2026-09-25
 
 - Branch `orchestration`, pushed to `origin` (ApexAiOfficial/codex-plugin-cc). `main` is untouched and equals upstream `db52e28`.
-- Code checkpoint: `ad935c8`. The docs commit containing this file sits on top of it.
-- Working tree: clean. No active Codex tickets, jobs, workers, ticket worktrees, or `refs/codex-companion/*` refs (all dogfood tickets are closed with decision records).
+- Latest pushed checkpoint: `e741a6d`. The last code-validated checkpoint is `0222176` (164/164 tests, tsc clean).
+- Working tree: clean apart from this file.
+- **Active Codex tickets** (fork data dir `~/.cache/codex-companion-fork`; do not delete their worktrees):
+  - `doctor`: implement, worktree `…/worktrees/doctor`; owns `lib/doctor.mjs`, `commands/doctor.md`, `codex-companion.mjs`, `tests/doctor.test.mjs`, `tests/commands.test.mjs`.
+  - `linux-platform`: investigate, scratch worktree `…/worktrees/linux-platform`; report only.
 - Validation at `ad935c8`: `npm test` 164/164, `npm run build` (tsc) clean, no stray broker/app-server/worker processes after a full run.
 
 ### Completed since the last handoff (`748cc16`)
@@ -31,14 +34,14 @@ These sources were reconciled: the pre-audit plan (`PROJECT_STATUS.md` at `748cc
 
 | # | Item | Why now / dependency | Lane |
 | --- | --- | --- | --- |
-| 1 | README + CHANGELOG for the fork's public behavior (durable jobs, SessionEnd change, tickets via skill, new env vars) | Public behavior changed without docs; overdue | Claude |
-| 2 | `doctor` diagnostic (companion subcommand plus `/codex:doctor`): Codex binaries/versions and skew, auth, broker health and identity, workers and heartbeats, open tickets, registered vs recorded worktrees, leftover journals/refs/locks, state integrity, platform capability (start markers) | Prerequisite for runbook procedures; also the most useful human-facing command | Codex implement ticket (new module + tests) while Claude does item 1 |
-| 3 | `RUNBOOK.md`: only procedures pressure-tested with controlled fixtures (worker death, broker death, busy broker at SessionEnd, interrupted integration, resume fallback, state corruption, rollback) | Needs `doctor`; failure injection needs the host (Codex's sandbox cannot run app-servers) | Claude |
+| 1 ✅ `61a3d82` | README + CHANGELOG for the fork's public behavior (durable jobs, SessionEnd change, tickets via skill, new env vars) | Public behavior changed without docs; overdue | Claude |
+| 2 ⏳ ticket `doctor` | `doctor` diagnostic (companion subcommand plus `/codex:doctor`): Codex binaries/versions and skew, auth, broker health and identity, workers and heartbeats, open tickets, registered vs recorded worktrees, leftover journals/refs/locks, state integrity, platform capability (start markers) | Prerequisite for runbook procedures; also the most useful human-facing command | Codex implement ticket (new module + tests) while Claude does item 1 |
+| 3 ◐ `e741a6d` | `RUNBOOK.md`: only procedures pressure-tested with controlled fixtures (worker death, broker death, busy broker at SessionEnd, interrupted integration, resume fallback, state corruption, rollback) | Needs `doctor`; failure injection needs the host (Codex's sandbox cannot run app-servers) | Claude |
 | 4 | Observe the monitor, SessionStart ledger, and Stop nudge live (`claude --plugin-dir plugins/codex`, and `claude -p` where headless suffices) | Only unit-tested so far | Claude, with the user for interactive checks |
-| 5 | Linux reference platform: evaluate `flock` (auto-release on death, removing stale-lock logic), pidfd (race-free signalling), inotify for `watch`, `/proc/pressure` for dispatch, child subreaper for worker trees; keep portable fallbacks | After the substrate stabilizes; no current Linux defect forces it | Codex investigate ticket (scratch worktree), then a Claude decision |
-| 6 | Classify the 100-item idea bank (already solved / adopted / adapted / rejected / deferred), with evidence | Original request; best done now that the architecture is stable | Claude |
+| 5 ⏳ ticket `linux-platform` | Linux reference platform: evaluate `flock` (auto-release on death, removing stale-lock logic), pidfd (race-free signalling), inotify for `watch`, `/proc/pressure` for dispatch, child subreaper for worker trees; keep portable fallbacks | After the substrate stabilizes; no current Linux defect forces it | Codex investigate ticket (scratch worktree), then a Claude decision |
+| 6 ✅ `efce6dd` | Classify the 100-item idea bank (already solved / adopted / adapted / rejected / deferred), with evidence | Original request; best done now that the architecture is stable | Claude |
 | 7 | Retention of closed tickets, job history, and journals (ideas 48–49) | Unbounded growth, low urgency | Codex implement |
-| 8 | Type-check the new modules (extend `tsconfig.app-server.json`) | Maintainability | Codex implement |
+| 8 ✅ `0222176` | Type-check the new modules (extend `tsconfig.app-server.json`) | Maintainability | Codex implement |
 | 9 | Model discovery via `model/list` (#638) and role-based model/effort guidance (ideas 50–52) | No hardcoded generations exist today | Later |
 | 10 | Delegation metrics/telemetry (ideas 79–81) | Needs real usage first | Later |
 | 11 | Route foreground `/codex:rescue` through durable jobs (#738) | The stock path is bounded by the Bash timeout | Later / optional |
@@ -47,7 +50,7 @@ Public command surface: add only `/codex:doctor` for now. `/codex:status` alread
 
 ## Exact next action
 
-Start item 1 (README/CHANGELOG) in Claude's lane and delegate item 2 (`doctor`) to Codex as a worktree implement ticket that owns a new `plugins/codex/scripts/lib/doctor.mjs`, `tests/doctor.test.mjs`, and `commands/doctor.md`. Then do item 3.
+When `doctor` finishes: `verify doctor`, review the diff, `integrate doctor`, run `npm test` and `npm run build`, then close the ticket. Add a validated doctor section to `RUNBOOK.md` by running it against controlled bad states (corrupt state, a leftover journal, dead broker metadata). When `linux-platform` finishes, decide which Linux primitives to adopt and put them on the roadmap. Then continue with items 4 and 7.
 
 ## Do not destroy
 
