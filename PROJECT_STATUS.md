@@ -61,6 +61,7 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 - `doctor` / `/codex:doctor`: a read-only runtime health diagnostic (the only new public command).
 - Stale-lock recovery serialized through a recovery gate. This fixes a reproduced race that admitted multiple lock holders.
 - Linux is the reference platform (decision from the `linux-platform` investigation): capability-detected enhancements with portable fallbacks.
+- Monitor notification delivery survives a watcher dying or failing to write: claims are identity-bound and lapse, and turns that finished before a watcher started are announced. Each case has a regression test.
 - Retention: job history is capped at 50 with its files, and journals are removed after integrate (measured bounded). `show` degrades cleanly to the ticket record once a job is pruned. `doctor` lists the worktrees kept for closed tickets, with age and size.
 - Model discovery: `preflight` shows the models Codex offers and the configured default. An invalid `--model` or `--effort` is rejected before a turn is spent. No model names are hardcoded.
 - Broker lifecycle recovery drilled on real processes (`tests/drills/broker-drill.mjs`): app-server death, broker death, SessionEnd while busy, idle exit.
@@ -95,19 +96,12 @@ The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open 
 - Test suite runtime is about 2.5 min, and the timing-sensitive upstream tests remain.
 - An older Codex cannot resume threads a newer Codex wrote into the shared `~/.codex`. This was measured with 0.144.1 against the desktop app's 0.155-alpha, and resolved here by updating the CLI to 0.156.1. If the desktop app later moves ahead again, tickets fall back to a fresh thread with a handoff, and `doctor` warns.
 - A foreground `/codex:rescue` still runs inside a subagent Bash call and is bounded by its timeout.
-- **Open review findings** (Codex `review-today`, on the lead's changes `a7908ae..e76bf8a`). Fixes for 1–5 are drafted on branch `wip/review-today-fixes` (`fded592`), untested and not merged:
-  1. **(medium)** `watch` claims before writing, so a failed write, or a turn that finished before the watcher armed, loses the notification.
-  2. **(medium)** A late orphan subagent can be claimed by an unrelated streaming client in the broker.
-  3. **(low)** The recovery gate mishandles the current pid and an unreadable marker.
-  4. **(low)** A `model/list` paging cap can reject a valid model.
-  5. **(low)** SemVer prerelease ordering in `doctor`.
-  6. **(low)** Test cleanup can delete dirs under a still-running detached test worker.
 - Codex's own sandboxed test runs share the host `/tmp` and can leave `codex-plugin-test-*` dirs behind (observed: 57 during the `retention` ticket). The lead's runs leave none.
 
 ## Validation status
 
 At the most recent commit on `orchestration` (see `CHECKPOINT_HANDOFF.md` for the exact SHA and results):
-- `npm test`: 187 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
+- `npm test`: 197 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
 - `npm run build` (tsc check): passes.
 - A full test run leaves no stray processes and no temp or state dirs (measured).
 - Live plugin check in an interactive Claude Code 2.1.280 session: the ledger, the Stop nudge, the monitor notification, and `/codex:doctor` all pass (`RUNBOOK.md` → "Live plugin check").

@@ -54,15 +54,19 @@ This audit checks open issues and PRs on [openai/codex-plugin-cc](https://github
 | Test suite leaked about 300 temp and state dirs per run | Temp dirs and their state dirs are removed on exit | `435b51a` |
 | `doctor` treated a closed shared-checkout ticket's workdir (the lead's checkout) as a retained worktree (found by the lead in the integrated `retention` change) | Only tickets with a real worktree record are listed; regression assertion fails on the old code | this checkpoint |
 
-## Open: Codex `review-today` findings on the lead's `a7908ae..e76bf8a`
+## Codex `review-today` findings on the lead's `a7908ae..e76bf8a` (resolved)
 
-Fixes for 1–5 are drafted, untested and unmerged, on branch `wip/review-today-fixes` (`fded592`). The Codex ticket `review-today` stays open for a re-review.
+An adversarial Codex review ran 4 turns on one thread. Each fix has a regression test that the lead verified fails on the prior code and passes now. Where that proof is structural only, it is noted.
 
-| # | Severity | Finding |
-| --- | --- | --- |
-| 1 | Medium | `watch` claims `notifiedAt` before writing. A failed write, or a turn that finished before the watcher armed, is never announced. |
-| 2 | Medium | Broker: a late subagent whose parent has no owners is claimed by whichever client is streaming, not released. |
-| 3 | Low | Recovery gate: the current pid skips recycle detection, and an unreadable marker counts as recycled. |
-| 4 | Low | `model/list` paging cap: an incomplete catalog is cached and rejects valid models. |
-| 5 | Low | `doctor` SemVer: `localeCompare` and large numeric identifiers. |
-| 6 | Low | Test cleanup removes dirs under still-running detached test workers. |
+| # | Severity | Finding | Fix | Commit |
+| --- | --- | --- | --- | --- |
+| 1 | Medium | `watch` claimed `notifiedAt` before writing, so a failed write, or a turn that finished before the watcher armed, was never announced. | Claim → write → confirm or give back; a startup scan covers this session's turns; seen is updated only after handling. | `e103287` |
+| 1a | Low (turn 2) | The rollback of a failed write could itself fail, leaving a permanent claim. | Claims record the delivering watcher's identity (`notifyPending`) and lapse when it is gone. | `18b4a25` |
+| 1b | Low (turn 3) | A failed *confirmation* lapsed at exit, causing a duplicate. | Settlement reports failure and is retried on every poll, at exit, and on SIGTERM. The unit test proof is structural. | `2eac4ec` |
+| 2 | Medium | Broker: a late orphan subagent was claimed by the unrelated streaming client. | A subagent belongs only to its parent's owners; an orphan is released. | `e103287` |
+| 2a | Medium (turn 2) | The orphan's notifications were still routed to that client, whose capture counted it as its own subagent. | Orphan-thread notifications go to no one. | `18b4a25` |
+| 2b | Low (turn 3) | The orphan markers were never removed. | A marker is removed after a successful unsubscribe. Internal state only; no behavioral test. | `2eac4ec` |
+| 3 | Low | The recovery gate mishandled the current pid and an unreadable marker. | A gate with our own pid is abandoned; a gate counts as recycled only when both markers are known and differ. | `e103287` |
+| 4 | Low | The `model/list` paging cap cached a partial catalog, which rejected valid models. | Unfinished paging or a repeated cursor makes discovery unavailable (fail open). | `e103287` |
+| 5 | Low | `doctor` SemVer: `localeCompare`, and prerelease numbers beyond 2^53. | ASCII order and exact numeric comparison; core numbers too (turn 2). | `e103287`, `18b4a25` |
+| 6 | Low | Test cleanup deleted dirs under still-running detached test workers. | Recorded workers are stopped (identity-checked) before removal. | `e103287` |

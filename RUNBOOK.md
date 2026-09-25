@@ -51,6 +51,8 @@ cx close t1 --accepted --reason "…"
 
 Watch a turn live in Codex's own UI: `codex resume <thread>` (the thread id is shown by `show`).
 
+Monitor notifications [test]: each finished turn is announced once. If the watcher dies or cannot write before confirming, its claim lapses, and a later watcher, or the Stop reminder, surfaces the turn. `wait` and `show` always report results regardless.
+
 ## A worker died (`worker-lost`) [real]
 
 Symptom: the outcome is `worker-lost` ("exited without recording a result"), reported on the next `tickets`/`show`/`status` read and by the monitor. The worker's app-server dies with its process group.
