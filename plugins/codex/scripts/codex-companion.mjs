@@ -22,6 +22,7 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
+import { collectDoctorReport, renderDoctorReport } from "./lib/doctor.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateRecordedProcessTree } from "./lib/process.mjs";
 import { createJobController } from "./lib/control-channel.mjs";
@@ -89,6 +90,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id|ticket] [--json]",
+      "  node scripts/codex-companion.mjs doctor [--json] [--cwd <path>]",
       "",
       "Delegated engineering tickets (durable, one Codex thread per ticket):",
       "  delegate [--ticket <name>] [--role implement|investigate|review] [--isolation shared|worktree] [--owns <path|glob>]... [--interface <contract>]... [--accept <command>]... [--network] [--read-only] [--model <m>] [--effort <e>] [--title <t>] [--brief-file <path> | brief]",
@@ -964,6 +966,24 @@ async function handleStatus(argv) {
   outputResult(renderStatusPayload(report, options.json), options.json);
 }
 
+async function handleDoctor(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  if (positionals.length > 0) {
+    throw new Error("doctor accepts only --json and --cwd <path>.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
+  const report = await collectDoctorReport(cwd, { scriptPath });
+  outputResult(options.json ? report : renderDoctorReport(report), options.json);
+  if (!report.ok) {
+    process.exitCode = 1;
+  }
+}
+
 function handleResult(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -1140,6 +1160,9 @@ async function main() {
       break;
     case "cancel":
       await handleCancel(argv);
+      break;
+    case "doctor":
+      await handleDoctor(argv);
       break;
     default:
       if (Object.hasOwn(TICKET_COMMANDS, subcommand)) {

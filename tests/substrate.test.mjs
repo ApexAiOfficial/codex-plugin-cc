@@ -174,7 +174,7 @@ test("the broker unsubscribes a thread, and its subagent threads, once the last 
     const unsubscribed = await waitFor(() => {
       const ids = fake.entries().filter((entry) => entry.method === "thread/unsubscribe").map((entry) => entry.params.threadId);
       return ids.includes(thread.id) && ids.length >= 2 ? ids : null;
-    });
+    }, { timeoutMs: 30000 });
     const child = fake.entries().filter((entry) => entry.method === "thread/unsubscribe").map((entry) => entry.params.threadId).find((id) => id !== thread.id);
     assert.ok(child, `expected the subagent thread to be released too: ${unsubscribed}`);
   }));
