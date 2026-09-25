@@ -46,4 +46,5 @@ This audit checks open issues and PRs on [openai/codex-plugin-cc](https://github
 | In the Codex sandbox, `spawnSync` reports EPERM and Node children lose stdout | Preflight detects and reports it, so the lead's `verify` stays authoritative. | `edcb5b0`, `3864ca2` |
 | Test suite leaked detached brokers (about 100 MB per test); repeated runs froze the dev machine | Harness stops brokers on exit and on signals. | `084b6f8`, `a17c2d7` |
 | Same-process async lock holders broke each other's lock | Async holders tracked in-process. | `a17c2d7` |
+| Stale-lock recovery admitted several holders at once (reproduced by the `linux-platform` ticket: up to 14 of 32 processes) | Recovery serialized through a `.recover` gate with a re-check; an abandoned gate fails closed; deterministic regression test | `bbc7640` |
 | Claim checks flagged honest failed-then-rerun claims | A claim is consistent if any matching run agrees. | `f269ceb` |

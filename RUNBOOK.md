@@ -11,6 +11,14 @@ cx() { node "$CODEX_COMPANION" "$@"; }
 
 Inside a Claude session with the fork loaded, `$CODEX_COMPANION` is exported automatically.
 
+## First: run the doctor [real]
+
+```bash
+cx doctor          # or /codex:doctor in Claude; read-only, exit 1 on any FAIL
+```
+
+It reports Codex version skew, state, lock and recovery-gate files, broker health, worker liveness and heartbeats, ticket consistency, and worktree, journal, and ref leftovers. Each finding comes with a fix hint. It never changes anything; this was pressure-tested against injected faults, and state files stayed byte-identical. An abandoned `*.lock.recover` gate is a FAIL: remove it once no companion process is running.
+
 ## Validate a change [real]
 
 ```bash

@@ -10,6 +10,8 @@
 - Broker hardening: thread unsubscribe, exit when the app-server dies, serialized acquisition that never kills a live broker, busy-aware shutdown, idle exit.
 - Bounded RPCs and a turn watchdog; explicit per-turn sandbox policy; retry-aware turn errors; fixes for missing-cwd probes, prompt text parsed as flags, missing `fileChange.changes`, and empty failure messages (see `UPSTREAM_AUDIT.md`).
 - A fresh-thread handoff when a Codex thread cannot be resumed; `CODEX_COMPANION_CODEX_BIN`.
+- `/codex:doctor`: read-only runtime health diagnostic.
+- Fix: stale-lock recovery could admit two lock holders at once.
 
 ## 1.0.0
 

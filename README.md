@@ -40,6 +40,8 @@ Environment variables:
 | `CODEX_COMPANION_TURN_PROBE_MS` | `120000` | Quiet period before the turn watchdog checks on a turn |
 | `CODEX_COMPANION_BROKER_IDLE_MS` | `1800000` | Idle time after which the shared broker exits |
 
+Diagnose runtime health (Codex version skew, broker, workers, tickets, worktrees) with `/codex:doctor`. Operating and recovery procedures are in [`RUNBOOK.md`](./RUNBOOK.md).
+
 To try the fork without replacing an installed upstream plugin, run `claude --plugin-dir /path/to/codex-plugin-cc/plugins/codex`.
 
 ## Requirements
