@@ -21,6 +21,30 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
+export const RPC_TIMEOUT_CODE = -32003;
+export const RPC_TIMEOUT_ENV = "CODEX_COMPANION_RPC_TIMEOUT_MS";
+// Healthy app-server RPCs answer in milliseconds; long work (turns, reviews) streams through
+// notifications after an immediate response. This bound only catches a wedged transport.
+const DEFAULT_RPC_TIMEOUT_MS = 120000;
+const COMMAND_EXEC_GRACE_MS = 60000;
+
+/** Wall-clock budget for one request; 0 disables. command/exec runs to completion before replying. */
+export function resolveRpcTimeoutMs(method, params, override) {
+  if (override != null) {
+    return Math.max(0, Number(override) || 0);
+  }
+  if (method === "command/exec") {
+    if (params?.disableTimeout) {
+      return 0;
+    }
+    return (Number(params?.timeoutMs) || DEFAULT_RPC_TIMEOUT_MS) + COMMAND_EXEC_GRACE_MS;
+  }
+  const configured = process.env[RPC_TIMEOUT_ENV];
+  if (configured != null && configured !== "") {
+    return Math.max(0, Number(configured) || 0);
+  }
+  return DEFAULT_RPC_TIMEOUT_MS;
+}
 
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
@@ -85,17 +109,46 @@ class AppServerClientBase {
    * @param {import("./app-server-protocol").AppServerRequestParams<M>} params
    * @returns {Promise<import("./app-server-protocol").AppServerResponse<M>>}
    */
-  request(method, params) {
+  request(method, params, options = {}) {
     if (this.closed) {
       throw new Error("codex app-server client is closed.");
+    }
+    if (this.exitResolved) {
+      // The connection is gone; a new request could never be answered.
+      return Promise.reject(this.exitError ?? new Error("codex app-server connection closed."));
     }
 
     const id = this.nextId;
     this.nextId += 1;
+    const timeoutMs = resolveRpcTimeoutMs(method, params, options.timeoutMs);
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
-      this.sendMessage({ id, method, params });
+      let timer = null;
+      const settle = (fn) => (value) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        fn(value);
+      };
+      this.pending.set(id, { resolve: settle(resolve), reject: settle(reject), method });
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (this.pending.delete(id)) {
+            reject(
+              createProtocolError(`codex app-server did not answer ${method} within ${timeoutMs}ms; the app-server may be wedged.`, {
+                code: RPC_TIMEOUT_CODE
+              })
+            );
+          }
+        }, timeoutMs);
+        timer.unref?.();
+      }
+      try {
+        this.sendMessage({ id, method, params });
+      } catch (error) {
+        this.pending.delete(id);
+        settle(reject)(error);
+      }
     });
   }
 

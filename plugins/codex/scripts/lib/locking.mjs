@@ -12,6 +12,8 @@ const DEFAULT_LOCK_TIMEOUT_MS = 15000;
 const DEFAULT_LOCK_STALE_MS = 30000;
 const SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
 const heldLocks = new Map();
+// Locks held by in-flight withFileLockAsync calls of this process (lockPath -> token).
+const asyncHeldLocks = new Map();
 
 export function sleepSync(ms) {
   Atomics.wait(SLEEP_CELL, 0, 0, Math.max(0, ms));
@@ -48,7 +50,7 @@ function lockIsStale(lockPath, staleMs) {
   if (owner && Number.isInteger(owner.pid)) {
     if (owner.pid === process.pid) {
       // Held locks are tracked in-process; an unknown one with our pid is a recycled-pid leftover.
-      return !heldLocks.has(lockPath);
+      return !heldLocks.has(lockPath) && asyncHeldLocks.get(lockPath) !== owner.token;
     }
     if (!isPidAlive(owner.pid)) {
       return true;
@@ -149,6 +151,58 @@ export function withFileLock(lockPath, fn, options = {}) {
       } catch {
         // Ignore; another process may have already reclaimed it.
       }
+    }
+  }
+}
+
+/**
+ * Async variant for critical sections that await (for example broker readiness). Same lock-file
+ * protocol and stale rules as withFileLock; not re-entrant. Resolves to `onTimeout()` when the
+ * lock cannot be acquired in time.
+ */
+export async function withFileLockAsync(lockPath, fn, options = {}) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  const staleMs = options.staleMs ?? DEFAULT_LOCK_STALE_MS;
+  const token = randomBytes(8).toString("hex");
+  const deadline = Date.now() + timeoutMs;
+  let delayMs = 10;
+  let fd = null;
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  while (fd === null) {
+    try {
+      fd = fs.openSync(lockPath, "wx");
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+      if (lockIsStale(lockPath, staleMs)) {
+        breakStaleLock(lockPath);
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        if (options.onTimeout) {
+          return options.onTimeout();
+        }
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for lock ${lockPath}.`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs + Math.random() * delayMs));
+      delayMs = Math.min(delayMs * 2, 200);
+    }
+  }
+  asyncHeldLocks.set(lockPath, token);
+  try {
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, marker: getProcessStartMarker(process.pid), token, acquiredAt: new Date().toISOString() }));
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    return await fn();
+  } finally {
+    if (asyncHeldLocks.get(lockPath) === token) {
+      asyncHeldLocks.delete(lockPath);
+    }
+    if (readLockOwner(lockPath)?.token === token) {
+      fs.rmSync(lockPath, { force: true });
     }
   }
 }

@@ -10,6 +10,9 @@ import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
+// Requests that subscribe the shared upstream connection to a thread (by params or result).
+const THREAD_CLAIMING_METHODS = new Set(["thread/start", "thread/resume", "thread/fork", "turn/start", "review/start", "thread/compact/start"]);
+const UNSUBSCRIBE_WAIT_MS = 5000;
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -20,6 +23,20 @@ function buildStreamThreadIds(method, params, result) {
     threadIds.add(result.reviewThreadId);
   }
   return threadIds;
+}
+
+function threadIdsFromResult(method, params, result) {
+  const ids = new Set();
+  if (params?.threadId) {
+    ids.add(params.threadId);
+  }
+  if (result?.thread?.id) {
+    ids.add(result.thread.id);
+  }
+  if (method === "review/start" && result?.reviewThreadId) {
+    ids.add(result.reviewThreadId);
+  }
+  return ids;
 }
 
 function buildJsonRpcError(code, message, data) {
@@ -69,7 +86,81 @@ async function main() {
   let activeRequestSocket = null;
   let activeStreamSocket = null;
   let activeStreamThreadIds = null;
+  let terminating = false;
   const sockets = new Set();
+
+  // Thread subscription ownership. Starting or resuming a thread subscribes the shared upstream
+  // connection; without a matching thread/unsubscribe, finished threads (and their subagents and
+  // MCP runtimes) stay loaded for the broker's lifetime. A thread is unsubscribed once its last
+  // downstream owner disconnects.
+  const socketThreads = new Map();
+  const threadOwners = new Map();
+  const pendingUnsubscribes = new Map();
+
+  function claimThread(socket, threadId) {
+    if (!threadId || socket.destroyed) {
+      return;
+    }
+    if (!socketThreads.has(socket)) {
+      socketThreads.set(socket, new Set());
+    }
+    socketThreads.get(socket).add(threadId);
+    if (!threadOwners.has(threadId)) {
+      threadOwners.set(threadId, new Set());
+    }
+    threadOwners.get(threadId).add(socket);
+  }
+
+  function unsubscribeWhenUnowned(threadId) {
+    const run = async () => {
+      if (terminating || threadOwners.get(threadId)?.size) {
+        return;
+      }
+      threadOwners.delete(threadId);
+      try {
+        await appClient.request("thread/unsubscribe", { threadId }, { timeoutMs: 30000 });
+      } catch (error) {
+        process.stderr.write(`[broker] thread/unsubscribe ${threadId} failed: ${error.message}\n`);
+      }
+    };
+    // Never reuse a sent unsubscribe: chain a fresh one that re-checks ownership when it runs.
+    const previous = pendingUnsubscribes.get(threadId) ?? Promise.resolve();
+    const next = previous.then(run, run).finally(() => {
+      if (pendingUnsubscribes.get(threadId) === next) {
+        pendingUnsubscribes.delete(threadId);
+      }
+    });
+    pendingUnsubscribes.set(threadId, next);
+  }
+
+  function releaseSocketThreads(socket) {
+    const threads = socketThreads.get(socket);
+    socketThreads.delete(socket);
+    for (const threadId of threads ?? []) {
+      const owners = threadOwners.get(threadId);
+      owners?.delete(socket);
+      if (!owners || owners.size === 0) {
+        unsubscribeWhenUnowned(threadId);
+      }
+    }
+  }
+
+  /** A request for a thread must not race that thread's in-flight unsubscribe. */
+  async function awaitThreadUnsubscribe(threadId) {
+    const pending = threadId ? pendingUnsubscribes.get(threadId) : null;
+    if (!pending) {
+      return true;
+    }
+    let timer = null;
+    const settled = await Promise.race([
+      pending.then(() => true, () => true),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), UNSUBSCRIBE_WAIT_MS);
+      })
+    ]);
+    clearTimeout(timer);
+    return settled;
+  }
 
   function clearSocketOwnership(socket) {
     if (activeRequestSocket === socket) {
@@ -83,6 +174,14 @@ async function main() {
 
   function routeNotification(message) {
     const target = activeRequestSocket ?? activeStreamSocket;
+    if (message.method === "thread/started" && message.params?.thread?.id) {
+      // Subagent threads inherit their parent's owners; otherwise the socket receiving the stream.
+      const parentOwners = threadOwners.get(message.params.thread.parentThreadId ?? "");
+      const owners = parentOwners?.size ? [...parentOwners] : target ? [target] : [];
+      for (const owner of owners) {
+        claimThread(owner, message.params.thread.id);
+      }
+    }
     if (!target) {
       return;
     }
@@ -100,6 +199,7 @@ async function main() {
   }
 
   async function shutdown(server) {
+    terminating = true;
     for (const socket of sockets) {
       socket.end();
     }
@@ -195,10 +295,27 @@ async function main() {
         }
 
         const isStreaming = STREAMING_METHODS.has(message.method);
+        const claims = THREAD_CLAIMING_METHODS.has(message.method);
+        if (claims && !(await awaitThreadUnsubscribe(message.params?.threadId))) {
+          send(socket, {
+            id: message.id,
+            error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "Shared Codex broker is still releasing this thread; retry.")
+          });
+          continue;
+        }
         activeRequestSocket = socket;
 
         try {
           const result = await appClient.request(message.method, message.params ?? {});
+          if (claims) {
+            for (const threadId of threadIdsFromResult(message.method, message.params ?? {}, result)) {
+              claimThread(socket, threadId);
+            }
+            if (socket.destroyed) {
+              // The requester left while waiting; do not strand what it just subscribed.
+              releaseSocketThreads(socket);
+            }
+          }
           send(socket, { id: message.id, result });
           if (isStreaming) {
             activeStreamSocket = socket;
@@ -225,12 +342,25 @@ async function main() {
     socket.on("close", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      releaseSocketThreads(socket);
     });
 
     socket.on("error", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      releaseSocketThreads(socket);
     });
+  });
+
+  // Without its app-server the broker can accept connections but never serve them; exit so the
+  // next caller sees a dead endpoint and starts a healthy broker instead of wedging on this one.
+  appClient.exitPromise.then(async () => {
+    if (terminating) {
+      return;
+    }
+    process.stderr.write(`[broker] codex app-server exited${appClient.exitError ? `: ${appClient.exitError.message}` : ""}; shutting down.\n`);
+    await shutdown(server);
+    process.exit(1);
   });
 
   process.on("SIGTERM", async () => {

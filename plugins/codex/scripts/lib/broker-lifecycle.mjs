@@ -6,11 +6,19 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
+import { withFileLockAsync } from "./locking.mjs";
+import { getProcessStartMarker, probeProcessIdentity, terminateRecordedProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
 const BROKER_STATE_FILE = "broker.json";
+const BROKER_LOCK_FILE = "broker.lock";
+// A healthy broker serving a turn can be slow to accept a probe connection; this is generous on
+// purpose, and a miss only ever means "use a private app-server this time", never "kill it".
+const EXISTING_BROKER_PROBE_MS = 3000;
+const NEW_BROKER_READY_MS = 8000;
+const BROKER_COMMAND_HINT = "app-server-broker.mjs";
 
 export function createBrokerSessionDir(prefix = "cxc-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -99,31 +107,55 @@ export function clearBrokerSession(cwd) {
   }
 }
 
-async function isBrokerEndpointReady(endpoint) {
+async function isBrokerEndpointReady(endpoint, timeoutMs) {
   if (!endpoint) {
     return false;
   }
   try {
-    return await waitForBrokerEndpoint(endpoint, 150);
+    return await waitForBrokerEndpoint(endpoint, timeoutMs);
   } catch {
     return false;
   }
 }
 
-export async function ensureBrokerSession(cwd, options = {}) {
-  const existing = loadBrokerSession(cwd);
-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
-    return existing;
+function brokerIdentity(session) {
+  if (!Number.isInteger(session?.pid)) {
+    return "gone";
   }
+  return probeProcessIdentity(session.pid, session.pidMarker ?? null, { commandHint: BROKER_COMMAND_HINT });
+}
 
+/**
+ * Return a usable shared broker for this workspace, starting one when needed, or null when the
+ * caller should use a private app-server. Acquisition is serialized so concurrent callers share one
+ * broker. A broker whose process is alive is never torn down because it answered a probe slowly;
+ * its metadata is removed only once the process is provably gone.
+ */
+export async function ensureBrokerSession(cwd, options = {}) {
+  const lockPath = path.join(resolveStateDir(cwd), BROKER_LOCK_FILE);
+  return withFileLockAsync(lockPath, () => acquireBrokerSession(cwd, options), {
+    timeoutMs: options.lockTimeoutMs ?? 10000,
+    onTimeout: () => null
+  });
+}
+
+async function acquireBrokerSession(cwd, options) {
+  const existing = loadBrokerSession(cwd);
   if (existing) {
+    if (await isBrokerEndpointReady(existing.endpoint, options.probeTimeoutMs ?? EXISTING_BROKER_PROBE_MS)) {
+      return existing;
+    }
+    const identity = brokerIdentity(existing);
+    if (identity === "same" || identity === "unknown") {
+      // Alive but not answering in time (busy, or wedged): leave it and its turn alone.
+      return null;
+    }
     teardownBrokerSession({
       endpoint: existing.endpoint ?? null,
       pidFile: existing.pidFile ?? null,
       logFile: existing.logFile ?? null,
       sessionDir: existing.sessionDir ?? null,
-      pid: existing.pid ?? null,
-      killProcess: options.killProcess ?? null
+      pid: null
     });
     clearBrokerSession(cwd);
   }
@@ -145,16 +177,19 @@ export async function ensureBrokerSession(cwd, options = {}) {
     logFile,
     env: options.env ?? process.env
   });
+  const pid = child.pid ?? null;
+  const pidMarker = getProcessStartMarker(pid);
 
-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
+  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? NEW_BROKER_READY_MS);
   if (!ready) {
+    // We spawned this process moments ago and know its identity, so stopping it is safe.
     teardownBrokerSession({
       endpoint,
       pidFile,
       logFile,
       sessionDir,
-      pid: child.pid ?? null,
-      killProcess: options.killProcess ?? null
+      pid,
+      killProcess: options.killProcess ?? ((target) => terminateRecordedProcessTree(target, pidMarker, { commandHint: BROKER_COMMAND_HINT }))
     });
     return null;
   }
@@ -164,7 +199,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
     pidFile,
     logFile,
     sessionDir,
-    pid: child.pid ?? null
+    pid,
+    pidMarker
   };
   saveBrokerSession(cwd, session);
   return session;

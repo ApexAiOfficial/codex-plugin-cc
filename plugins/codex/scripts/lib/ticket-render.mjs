@@ -56,7 +56,7 @@ export function renderLaunch(ticket, job, { companion, followup = false, notes =
     `Codex ticket ${ticket.id} ${followup ? `turn ${ticket.turns?.length ?? "?"} started` : "started"} (${describeWhere(ticket)}) as job ${job.id}.`
   ];
   if (ticket.isolation === "worktree") {
-    lines.push(`Worktree: ${ticket.workdir}${ticket.worktree?.snapshotOfDirtyTree ? " (includes your uncommitted changes at launch)" : ""}`);
+    lines.push(`Worktree: ${ticket.workdir}${!followup && ticket.worktree?.snapshotOfDirtyTree ? " (includes your uncommitted changes at launch)" : ""}`);
   }
   if (ticket.owns?.length) {
     lines.push(`Owns: ${ticket.owns.join(", ")}`);
