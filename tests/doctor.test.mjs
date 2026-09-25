@@ -369,7 +369,10 @@ test("version skew is a warning only when the companion's Codex is the older one
     ["codex-cli 1.0.0-1", "codex-cli 1.0.0-alpha", "WARN", "older"],
     ["codex-cli 1.0.0-9007199254740993", "codex-cli 1.0.0-9007199254740992", "OK", "newer"],
     ["codex-cli 1.0.0-ALPHA", "codex-cli 1.0.0-alpha", "WARN", "older"],
-    ["codex-cli 0.156.0", "codex-cli 0.156.0 (build 7)", "OK", "same"]
+    ["codex-cli 0.156.0", "codex-cli 0.156.0 (build 7)", "OK", "same"],
+    // Core numbers beyond 2^53 compare exactly (re-review finding).
+    ["codex-cli 9007199254740993.0.0", "codex-cli 9007199254740992.0.0", "OK", "newer"],
+    ["codex-cli 0.9007199254740992.0", "codex-cli 0.9007199254740993.0", "WARN", "older"]
   ];
   for (const [companionVersion, configuredVersion, status, direction] of cases) {
     const report = await doctor(ctx, {
