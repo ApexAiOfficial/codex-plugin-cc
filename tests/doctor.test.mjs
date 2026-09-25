@@ -366,6 +366,9 @@ test("version skew is a warning only when the companion's Codex is the older one
     ["codex-cli 0.156.1", "codex-cli 0.155.0-alpha.16.4", "OK", "newer"],
     ["codex-cli 0.156.0-alpha.3", "codex-cli 0.156.0", "WARN", "older"],
     ["codex-cli 0.156.0-alpha.10", "codex-cli 0.156.0-alpha.9", "OK", "newer"],
+    ["codex-cli 1.0.0-1", "codex-cli 1.0.0-alpha", "WARN", "older"],
+    ["codex-cli 1.0.0-9007199254740993", "codex-cli 1.0.0-9007199254740992", "OK", "newer"],
+    ["codex-cli 1.0.0-ALPHA", "codex-cli 1.0.0-alpha", "WARN", "older"],
     ["codex-cli 0.156.0", "codex-cli 0.156.0 (build 7)", "OK", "same"]
   ];
   for (const [companionVersion, configuredVersion, status, direction] of cases) {

@@ -5,6 +5,8 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 
 import { loadBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { sleepSync } from "../plugins/codex/scripts/lib/locking.mjs";
+import { isSameProcess } from "../plugins/codex/scripts/lib/process.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 // Tests must not inherit the host Claude session's plugin wiring. When the suite runs inside a
@@ -57,24 +59,90 @@ function shutDownTestBrokers() {
   }
 }
 
-// Every temp dir this process created, plus the state dir the runtime derived for it under the
-// fallback root (CLAUDE_PLUGIN_DATA is scrubbed above), would otherwise outlive the run: each
-// full run used to leave ~200 dirs in the temp dir and ~90 under <tmp>/codex-companion.
+// Every temp dir this process created, plus the state dirs the runtime derived for it, would
+// otherwise outlive the run: each full run used to leave ~200 dirs in the temp dir and ~90 under
+// <tmp>/codex-companion. A state dir is either under the fallback root (CLAUDE_PLUGIN_DATA is
+// scrubbed above) or under <dir>/state/ when the dir served as a child's CLAUDE_PLUGIN_DATA.
+function stateDirsFor(dir, fallbackRoot) {
+  const found = [];
+  try {
+    const derived = resolveStateDir(dir);
+    if (derived.startsWith(fallbackRoot)) {
+      found.push(derived);
+    }
+  } catch {
+    // The dir may already be gone; nothing to derive.
+  }
+  try {
+    for (const entry of fs.readdirSync(path.join(dir, "state"), { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        found.push(path.join(dir, "state", entry.name));
+      }
+    }
+  } catch {
+    // Not a plugin data dir.
+  }
+  return found;
+}
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+// A detached ticket worker a test left running would otherwise keep going with its cwd and state
+// deleted underneath it. Stop the ones recorded in these state dirs first, identity-checked.
+function stopRecordedWorkers(stateDirs) {
+  const live = [];
+  for (const stateDir of stateDirs) {
+    let jobs = [];
+    try {
+      jobs = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs ?? [];
+    } catch {
+      continue;
+    }
+    for (const job of jobs) {
+      const active = job.status === "queued" || job.status === "running";
+      if (active && Number.isInteger(job.pid) && isSameProcess(job.pid, job.pidMarker ?? null, { commandHint: job.pidCommandHint })) {
+        live.push(job.pid);
+      }
+    }
+  }
+  const signal = (name) => {
+    for (const pid of live) {
+      for (const target of process.platform === "win32" ? [pid] : [-pid, pid]) {
+        try {
+          process.kill(target, name);
+          break;
+        } catch {
+          // Not a group leader, or already gone.
+        }
+      }
+    }
+  };
+  signal("SIGTERM");
+  const deadline = Date.now() + 2000;
+  while (live.some(isAlive) && Date.now() < deadline) {
+    sleepSync(25);
+  }
+  if (live.some(isAlive)) {
+    signal("SIGKILL");
+  }
+}
+
 function removeTestDirs() {
   const fallbackRoot = path.join(os.tmpdir(), "codex-companion") + path.sep;
-  for (const dir of createdTempDirs) {
+  const stateDirs = [...createdTempDirs].flatMap((dir) => stateDirsFor(dir, fallbackRoot));
+  stopRecordedWorkers(stateDirs);
+  for (const target of [...stateDirs, ...createdTempDirs]) {
     try {
-      const stateDir = resolveStateDir(dir);
-      if (stateDir.startsWith(fallbackRoot)) {
-        fs.rmSync(stateDir, { recursive: true, force: true });
-      }
+      fs.rmSync(target, { recursive: true, force: true });
     } catch {
-      // The dir may already be gone; nothing to derive.
-    }
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // A still-running detached worker may hold files open; leave it.
+      // Leave anything that cannot be removed.
     }
   }
 }
