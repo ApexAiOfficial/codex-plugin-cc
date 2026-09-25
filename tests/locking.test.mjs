@@ -99,3 +99,17 @@ test("an abandoned recovery gate fails closed instead of guessing", async () => 
   fs.writeFileSync(`${lockPath}.recover`, JSON.stringify({ pid: dead.pid }));
   assert.throws(() => withFileLock(lockPath, () => "entered", { timeoutMs: 300 }), /recovery gate .*\.recover/);
 });
+
+test("a recovery gate whose pid was recycled by another process is also reported as abandoned", async (t) => {
+  const { withFileLock } = await import(LOCKING);
+  const dir = makeTempDir();
+  const lockPath = path.join(dir, "state.lock");
+  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((resolve) => dead.on("exit", resolve));
+  // A live process stands in for the recycled pid; the recorded start marker is from the earlier owner.
+  const live = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => live.kill("SIGKILL"));
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: dead.pid, token: "dead" }));
+  fs.writeFileSync(`${lockPath}.recover`, JSON.stringify({ pid: live.pid, marker: "linux:1" }));
+  assert.throws(() => withFileLock(lockPath, () => "entered", { timeoutMs: 300 }), /abandoned by an earlier process with pid/);
+});

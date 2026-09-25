@@ -106,6 +106,16 @@ A busy broker is never killed because it answered slowly ([test]); that call use
 node tests/drills/broker-drill.mjs      # expect ALL DRILLS PASSED
 ```
 
+## Processes started by Codex commands [real]
+
+On Linux, Codex runs every sandboxed command, including tickets granted `--network`, under `bwrap --unshare-pid --as-pid-1 --die-with-parent`. Anything the command starts dies when the command ends, including `setsid`, `nohup`, and double-forked daemons, and it cannot outlive the app-server either. A ticket therefore cannot leave a stray dev server or watcher behind. Re-check after a Codex update:
+
+```bash
+node tests/drills/sandbox-containment-drill.mjs   # ~15 s, no model turns; expect ALL DRILLS PASSED
+```
+
+A test that needs a long-running service (a dev server, a database) cannot keep it running between Codex commands. Run such checks in Claude (`verify`) or start the service inside the same command.
+
 ## State corruption [test]
 
 A corrupt `state.json` is moved aside to `state.json.corrupt-<ts>` and the job index is rebuilt from the job files automatically. Ticket files are separate and unaffected.
@@ -124,10 +134,26 @@ git fetch origin && git reset --hard <checkpoint-sha>   # checkpoints are listed
 
 Checking out `main` returns the plugin source to upstream behavior. The installed marketplace plugin is unaffected by this branch.
 
+## A lock recovery gate is abandoned [test]
+
+Symptom: every companion command fails with `Lock recovery gate …state.lock.recover was abandoned…`, and `doctor` reports a FAIL. This happens only if a process dies inside the sub-millisecond window while it breaks a stale lock, or if its pid was reused after a reboot. Fix: confirm that no companion process is running (`ps -eo pid,cmd | grep codex-companion`), then remove the named `.recover` file. The gate is never removed automatically; guessing there could admit two lock holders.
+
 ## Never delete while work is active
 
 The state dir (`$CLAUDE_PLUGIN_DATA/state/<repo>-<hash>/`), `*.integration-journal` directories, ticket worktrees (use `close --purge`), and `refs/codex-companion/*` refs of open tickets.
 
+## Live plugin check [pending: headless parts real]
+
+Checks the model-facing surfaces in one interactive session, against a fake Codex in a disposable repo (no quota). Covered: the SessionStart ledger reaching the model, the Stop reminder, a monitor notification, and `/codex:doctor`. Verified headless (no login needed): `--plugin-dir` replaces the installed upstream `codex` plugin for that session, and the SessionStart hook prints the ledger.
+
+```bash
+node tests/drills/live-check-setup.mjs                                   # repo, fake Codex, one staged ticket
+cd ~/.cache/codex-companion-live-check/repo
+CODEX_COMPANION_CODEX_BIN="$HOME/.cache/codex-companion-live-check/bin/codex" ~/.config/Claude/claude-code/<version>/claude --plugin-dir "<fork>/plugins/codex" --allowedTools "Bash(node:*)" "Bash(sleep:*)"
+```
+
+In the session, paste the prompt from `tests/drills/live-check-prompt.md`, wait for the monitor notification, run `/codex:doctor`, then `/exit`. The transcript is under `~/.claude/projects/-home-logan--cache-codex-companion-live-check-repo/`. Clean up with `node tests/drills/live-check-setup.mjs --cleanup`.
+
 ## Not yet validated here
 
-These are expected to work but have not been exercised end to end: loading the fork as the active plugin in an interactive session (`claude --plugin-dir plugins/codex`) with live monitor notifications, the SessionStart ledger, and the Stop nudge; Windows and macOS behavior; account switching mid-ticket.
+These are expected to work but have not been exercised end to end: the interactive live check above, Windows and macOS behavior, and account switching mid-ticket.

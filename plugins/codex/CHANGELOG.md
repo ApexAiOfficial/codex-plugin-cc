@@ -15,6 +15,9 @@
 - `doctor`: the Codex version-skew check is now direction-aware. Only a companion that is older than the `CODEX_CLI_PATH` install warns; that is the only direction that breaks resume.
 - A ticket turn stopped by usage limits, authentication, or infrastructure errors now shows Codex's own error message on the card and in the job record, including the reset time for usage limits.
 - `tests/drills/broker-drill.mjs`: a manual real-process drill of broker lifecycle recovery (no model turns).
+- `tests/drills/sandbox-containment-drill.mjs`: a manual drill confirming that nothing a sandboxed Codex command starts outlives the command on Linux.
+- `tests/drills/live-check-setup.mjs`: a disposable workspace with a fake Codex for the interactive plugin check.
+- Fix: a lock recovery gate left by a process whose pid was later reused (for example after a reboot) is now reported as abandoned, instead of making contenders time out with a misleading error.
 
 ## 1.0.0
 
