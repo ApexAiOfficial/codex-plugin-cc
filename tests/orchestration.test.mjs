@@ -455,6 +455,18 @@ test("session start exports the runtime path and injects the open-ticket ledger"
   assert.equal(quiet.stdout, "");
 });
 
+test("the stop hook notes a running ticket without suggesting cancel", async () => {
+  const ctx = setupRepo();
+  const env = { ...ctx.env, CODEX_COMPANION_SESSION_ID: "sess-running" };
+  companionJson(["delegate", "--ticket", "busy", "Long work.\nFAKE_SLOW"], { cwd: ctx.repo, env });
+  const note = run("node", [STOP_HOOK], { cwd: ctx.repo, env, input: JSON.stringify({ hook_event_name: "Stop", session_id: "sess-running", cwd: ctx.repo }) });
+  assert.equal(note.status, 0, note.stderr);
+  assert.equal(note.stdout.trim(), "");
+  assert.match(note.stderr, /Codex ticket busy is still running; it keeps running after this turn/);
+  assert.doesNotMatch(note.stderr, /codex:cancel/);
+  companion(["cancel", "busy"], { cwd: ctx.repo, env });
+});
+
 test("the stop hook surfaces an unreviewed ticket turn exactly once", () => {
   const ctx = setupRepo();
   const env = { ...ctx.env, CODEX_COMPANION_SESSION_ID: "sess-nudge" };
@@ -476,6 +488,40 @@ test("the stop hook surfaces an unreviewed ticket turn exactly once", () => {
     const active = run("node", [STOP_HOOK], { cwd: ctx.repo, env, input: JSON.stringify({ ...JSON.parse(hookInput), stop_hook_active: true }) });
     assert.equal(active.stdout.trim(), "");
   });
+});
+
+test("the plugin monitor arms for the skill name Claude Code dispatches", () => {
+  // Claude Code compares `when` to the dispatched name verbatim: the Skill tool and slash commands
+  // use the plugin-namespaced name ("codex:codex-delegation"); a bare name is also accepted.
+  const pluginRoot = path.resolve(path.dirname(SCRIPT), "..");
+  const monitors = JSON.parse(fs.readFileSync(path.join(pluginRoot, "monitors", "monitors.json"), "utf8"));
+  const pluginName = JSON.parse(fs.readFileSync(path.join(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).name;
+  const triggers = monitors.map((monitor) => monitor.when);
+  assert.ok(triggers.includes(`on-skill-invoke:${pluginName}:codex-delegation`), triggers.join(", "));
+  assert.ok(triggers.includes("on-skill-invoke:codex-delegation"), triggers.join(", "));
+  assert.equal(new Set(monitors.map((monitor) => monitor.name)).size, monitors.length, "monitor names are unique");
+  for (const monitor of monitors) {
+    assert.ok(monitor.command && monitor.description, `${monitor.name} has a command and description`);
+    const skill = monitor.when.slice("on-skill-invoke:".length).split(":").pop();
+    assert.ok(fs.existsSync(path.join(pluginRoot, "skills", skill, "SKILL.md")), `${monitor.when} names a real skill`);
+  }
+});
+
+test("two armed watchers report a finished turn only once", async (t) => {
+  const ctx = setupRepo();
+  const watchers = [0, 1].map(() => spawn(process.execPath, [SCRIPT, "watch", "--interval-ms", "250"], { cwd: ctx.repo, env: ctx.env }));
+  let output = "";
+  for (const watcher of watchers) {
+    t.after(() => watcher.kill("SIGTERM"));
+    watcher.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  companionJson(["delegate", "--ticket", "twice", "Once.\nFAKE_WRITE src/t.js 1"], { cwd: ctx.repo, env: ctx.env });
+  await waitFor(() => output.includes("Codex ticket twice finished turn 1"), { timeoutMs: 20000 });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(output.trim().split("\n").length, 1, `duplicate notifications:\n${output}`);
 });
 
 test("watch emits one notification line per finished ticket turn", async (t) => {

@@ -181,9 +181,13 @@ function main() {
 
   const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), input));
   const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");
-  const runningTaskNote = runningJob
-    ? `Codex task ${runningJob.id} is still running. Check /codex:status and use /codex:cancel ${runningJob.id} if you want to stop it before ending the session.`
-    : null;
+  // Ticket turns are meant to run on while Claude works; their completion is reported by the
+  // monitor, wait, or the next stop, so they only get a short note.
+  const runningTaskNote = !runningJob
+    ? null
+    : runningJob.ticketId
+      ? `Codex ticket ${runningJob.ticketId} is still running; it keeps running after this turn, and its result is reported when it finishes.`
+      : `Codex task ${runningJob.id} is still running. Check /codex:status and use /codex:cancel ${runningJob.id} if you want to stop it before ending the session.`;
 
   if (!config.stopReviewGate) {
     logNote(runningTaskNote);
