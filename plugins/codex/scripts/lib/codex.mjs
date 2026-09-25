@@ -42,7 +42,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
+import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient, resolveCodexBinary } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
 
@@ -1034,12 +1034,12 @@ async function getCodexAuthStatusFromClient(client, cwd) {
 }
 
 export function getCodexAvailability(cwd) {
-  const versionStatus = binaryAvailable("codex", ["--version"], { cwd });
+  const versionStatus = binaryAvailable(resolveCodexBinary(), ["--version"], { cwd });
   if (!versionStatus.available) {
     return versionStatus;
   }
 
-  const appServerStatus = binaryAvailable("codex", ["app-server", "--help"], { cwd });
+  const appServerStatus = binaryAvailable(resolveCodexBinary(), ["app-server", "--help"], { cwd });
   if (!appServerStatus.available) {
     return {
       available: false,

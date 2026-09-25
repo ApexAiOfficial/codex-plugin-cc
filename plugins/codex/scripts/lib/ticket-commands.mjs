@@ -58,6 +58,7 @@ import {
 } from "./tracked-jobs.mjs";
 import {
   buildFollowupPrompt,
+  buildResumeHandoffBlock,
   buildWorkPackagePrompt,
   classifyTurnFailure,
   loadWorkReportSchema,
@@ -195,6 +196,9 @@ function finalizeTicketTurn(workspaceRoot, ticketId, job) {
     ticket.lastJobId = job.id;
     ticket.lastOutcome = outcome;
     ticket.lastSummary = payload?.report?.summary || shorten(firstLine(payload?.rawOutput), 200) || job.errorMessage || null;
+    if (payload?.threadReset) {
+      ticket.threadHistory = [...(ticket.threadHistory ?? []), { ...payload.threadReset, replacedBy: payload.threadId ?? null, turn: payload.turn }];
+    }
     if (job.threadId || payload?.threadId) {
       ticket.threadId = payload?.threadId ?? job.threadId;
     }
@@ -359,6 +363,21 @@ function writeTrace(workspaceRoot, jobId, commandExecutions) {
   fs.writeFileSync(resolveJobArtifactPath(workspaceRoot, jobId, ".trace.jsonl"), lines.length ? `${lines.join("\n")}\n` : "", "utf8");
 }
 
+/** thread/resume failed before any turn ran (as opposed to a failure during the turn). */
+function isResumeFailure(error) {
+  const message = String(error?.message ?? "");
+  return /paginated_threads is not supported|no rollout found|thread not found|failed to (?:load|resume) thread|could not resume/i.test(message);
+}
+
+function previousTurnHandoff(workspaceRoot, ticket) {
+  return (ticket.turns ?? [])
+    .filter((entry) => entry.jobId !== ticket.activeJobId)
+    .map((entry) => {
+      const job = readStoredJob(workspaceRoot, entry.jobId);
+      return { turn: entry.turn, outcome: entry.outcome, feedback: entry.feedback, report: job?.result?.report ?? null, summary: job?.summary ?? null };
+    });
+}
+
 function latestFailingVerification(ticket) {
   const verification = ticket.verifications?.at(-1);
   if (!verification || verification.jobId !== ticket.lastJobId) {
@@ -417,8 +436,7 @@ export async function runTicketTurn(request, ctx, { progress, jobId }) {
     const startTree = snapshot();
     const headAtStart = readHead(workdir);
 
-    const result = await runAppServerTurn(workdir, {
-      resumeThreadId: freshThread ? null : ticket.threadId,
+    const turnOptions = {
       prompt,
       model: request.model ?? ticket.model ?? null,
       effort: request.effort ?? ticket.effort ?? null,
@@ -430,7 +448,28 @@ export async function runTicketTurn(request, ctx, { progress, jobId }) {
       disableBroker: true,
       controller,
       onProgress: progress
-    });
+    };
+    let result;
+    let threadReset = null;
+    try {
+      result = await runAppServerTurn(workdir, { ...turnOptions, resumeThreadId: freshThread ? null : ticket.threadId });
+    } catch (error) {
+      if (freshThread || !isResumeFailure(error)) {
+        throw error;
+      }
+      // The thread exists but cannot be resumed (for example a Codex version that cannot read the
+      // thread store). Continue on a fresh thread with the full package and a handoff instead of
+      // failing the ticket.
+      threadReset = { previousThreadId: ticket.threadId, reason: error.message, at: nowIso() };
+      progress?.({ message: `Could not resume thread ${ticket.threadId} (${error.message}); continuing on a fresh thread with a handoff.`, phase: "starting" });
+      const handoffPrompt = [
+        buildWorkPackagePrompt(ctx.rootDir, ticket, preflight),
+        buildResumeHandoffBlock(ticket, previousTurnHandoff(workspaceRoot, ticket), error.message),
+        prompt
+      ].join("\n\n");
+      updateJobFile(workspaceRoot, jobId, (job) => (job ? { ...job, prompt: handoffPrompt, threadReset } : null));
+      result = await runAppServerTurn(workdir, { ...turnOptions, prompt: handoffPrompt, resumeThreadId: null });
+    }
 
     const endTree = snapshot();
     const evidence =
@@ -462,6 +501,7 @@ export async function runTicketTurn(request, ctx, { progress, jobId }) {
     const payload = {
       ticketId: ticket.id,
       turn: request.turn,
+      threadReset,
       outcome,
       report: parsed.report,
       parseError: parsed.report ? null : parsed.parseError,

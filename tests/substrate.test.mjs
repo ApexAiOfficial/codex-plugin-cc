@@ -4,6 +4,7 @@ import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { initGitRepo, makeTempDir } from "./helpers.mjs";
 import { installSubstrateFake } from "./substrate-fake.mjs";
@@ -11,6 +12,10 @@ import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mj
 import { ensureBrokerSession, loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { runAppServerTurn } from "../plugins/codex/scripts/lib/codex.mjs";
 import { getProcessStartMarker, isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
+import { resolveTicketFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { run } from "./helpers.mjs";
+
+const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "plugins", "codex", "scripts", "codex-companion.mjs");
 
 // Regression tests for the transport/broker substrate, cross-checked against upstream reports:
 // openai/codex-plugin-cc #302 (unbounded waits), #453 (zombie broker), #574 (false success),
@@ -244,3 +249,34 @@ test("concurrent callers share one broker instead of racing to create several", 
     assert.equal(endpoints.size, 1, `expected one shared broker, got ${[...endpoints].join(", ")}`);
     assert.ok(fs.existsSync(loadBrokerSession(dir).pidFile));
   }));
+
+// ------------------------------------------------------------------------------------------
+// Ticket continuity when a thread cannot be resumed
+
+test("a followup whose thread cannot be resumed continues on a fresh thread with a handoff", () => {
+  const dir = repo();
+  fs.writeFileSync(path.join(dir, "a.txt"), "x\n");
+  run("git", ["add", "."], { cwd: dir });
+  run("git", ["commit", "-qm", "init"], { cwd: dir });
+  const env = { ...process.env, FAKE_SUBSTRATE_MODE: "resume-unsupported" };
+  const cli = (...args) => {
+    const result = run("node", [SCRIPT, ...args, "--json"], { cwd: dir, env });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  cli("delegate", "--ticket", "cont", "--role", "investigate", "Investigate the thing.");
+  const first = cli("wait", "cont", "--timeout-ms", "20000");
+  const firstThread = first.ticket.threadId;
+  assert.ok(firstThread);
+  const before = fake.entries().length;
+  cli("followup", "cont", "Dig into the second hypothesis.");
+  const second = cli("wait", "cont", "--timeout-ms", "20000");
+  assert.notEqual(second.ticket.threadId, firstThread, "a fresh thread took over");
+  assert.equal(second.job.result.threadReset.previousThreadId, firstThread);
+  const ticket = JSON.parse(fs.readFileSync(resolveTicketFile(dir, "cont"), "utf8"));
+  assert.equal(ticket.threadHistory[0].previousThreadId, firstThread);
+  const prompt = turnStarts(before).at(-1).params.input[0].text;
+  assert.match(prompt, /<work_package ticket="cont"/);
+  assert.match(prompt, /<previous_turns>[\s\S]*could no longer be resumed \(paginated_threads is not supported yet\)/);
+  assert.match(prompt, /Dig into the second hypothesis/);
+});

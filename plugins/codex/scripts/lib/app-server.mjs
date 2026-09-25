@@ -23,6 +23,13 @@ export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
 export const RPC_TIMEOUT_CODE = -32003;
 export const RPC_TIMEOUT_ENV = "CODEX_COMPANION_RPC_TIMEOUT_MS";
+export const CODEX_BIN_ENV = "CODEX_COMPANION_CODEX_BIN";
+
+/** The Codex executable to run; override when several installs coexist (for example a newer desktop build). */
+export function resolveCodexBinary(env = process.env) {
+  const configured = env?.[CODEX_BIN_ENV];
+  return configured && configured.trim() ? configured.trim() : "codex";
+}
 // Healthy app-server RPCs answer in milliseconds; long work (turns, reviews) streams through
 // notifications after an immediate response. This bound only catches a wedged transport.
 const DEFAULT_RPC_TIMEOUT_MS = 120000;
@@ -242,7 +249,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    this.proc = spawn("codex", ["app-server"], {
+    this.proc = spawn(resolveCodexBinary(this.options.env ?? process.env), ["app-server"], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
       stdio: ["pipe", "pipe", "pipe"],

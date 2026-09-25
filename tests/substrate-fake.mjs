@@ -50,10 +50,19 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return send({ method: "thread/started", params: { thread: thread(id) } });
     }
     case "thread/resume": {
+      if (MODE === "resume-unsupported") {
+        // Codex CLI 0.144.1 against a thread store written by a newer Codex build.
+        return send({ id: message.id, error: { code: -32600, message: "paginated_threads is not supported yet" } });
+      }
       const id = p.threadId;
       threads.set(id, threads.get(id) || { status: "idle", turns: [] });
       return send({ id: message.id, result: { thread: thread(id), model: "fake", sandbox: { type: "workspaceWrite", networkAccess: false, writableRoots: [] } } });
     }
+    case "thread/name/set":
+      return send({ id: message.id, result: {} });
+    case "command/exec":
+      // Enough for the preflight probe: report a sandbox with the requested policy and no network.
+      return send({ id: message.id, result: { exitCode: 0, stdout: JSON.stringify({ tools: { node: "fake" }, write: (p.sandboxPolicy || {}).type === "workspaceWrite", gitWrite: false, dockerDaemon: null, network: false, syncSpawnReliable: true }), stderr: "" } });
     case "thread/unsubscribe":
       return send({ id: message.id, result: { status: "unsubscribed" } });
     case "thread/read": {
