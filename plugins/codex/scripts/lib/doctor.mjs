@@ -621,7 +621,8 @@ export async function collectDoctorReport(cwd, options = {}) {
   const closedIds = new Set(allTickets.filter((ticket) => CLOSED_TICKET_STATES.has(ticket.state)).map((ticket) => ticket.id));
   const closedRefs = refs.filter((ref) => closedIds.has(ref.slice(TICKET_REF_PREFIX.length).split("/")[0]));
   const retainedClosed = recorded
-    .filter((entry) => CLOSED_TICKET_STATES.has(entry.ticket.state) && fs.existsSync(entry.path))
+    // Only real ticket worktrees: a shared-isolation ticket's workdir is the lead's own checkout.
+    .filter((entry) => entry.ticket.worktree?.path && CLOSED_TICKET_STATES.has(entry.ticket.state) && fs.existsSync(entry.path))
     .map((entry) => ({
       id: entry.ticket.id,
       state: entry.ticket.state,

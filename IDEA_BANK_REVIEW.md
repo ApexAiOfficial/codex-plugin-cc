@@ -52,7 +52,7 @@ Classification of the 100-item orchestration idea bank against what the fork act
 | 46 | Safe final application | Adapted | Index never touched, HEAD-moved warning, conflict abort |
 | 47 | Failed-artifact preservation | Adopted | Rejected/abandoned tickets keep worktrees; journals are kept |
 | 48 | Success-aware cleanup | Adopted | Accepting removes the worktree and refs |
-| 49 | Retention policy | Deferred | Roadmap 7 |
+| 49 | Retention policy | Adapted | Measured bounded (50-job cap with files, journals removed after integrate). `show` degrades to the ticket record, and `doctor` lists retained worktrees with age and size. No automatic deletion. |
 | 50–52 | Model / effort routing, escalation, discovery | Adapted | Discovery and validation via `model/list` (`models.mjs`). Routing is skill guidance (default config; raise effort for hard packages; avoid `ultra` unless asked), not an automatic router |
 | 53 | Agent-budget accounting | Adapted | Subagent count recorded; not budgeted |
 | 54 | Native child-agent awareness | Adapted | Subagent tracking in capture and in broker ownership |

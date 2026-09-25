@@ -190,13 +190,19 @@ test("a young retained worktree is listed as OK without counting symlinked depen
     }),
     "utf8"
   );
+  // A closed shared-checkout ticket has no worktree: its workdir is the lead's checkout itself.
+  fs.writeFileSync(
+    path.join(ctx.stateDir, "tickets", "old-shared.json"),
+    JSON.stringify({ id: "old-shared", state: "abandoned", isolation: "shared", closedAt: new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString(), workdir: ctx.repo }),
+    "utf8"
+  );
 
   const before = snapshotTree(ctx.stateDir);
   const report = await doctor(ctx, { now });
   const retained = finding(report, "retained-closed-worktrees");
 
   assert.equal(retained.status, "OK");
-  assert.equal(retained.data.tickets.length, 1);
+  assert.equal(retained.data.tickets.length, 1, "the shared ticket's checkout is not a retained worktree");
   assert.deepEqual(retained.data.tickets[0], {
     id: "young-retained",
     state: "rejected",

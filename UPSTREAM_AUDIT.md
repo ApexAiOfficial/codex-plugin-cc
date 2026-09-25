@@ -50,5 +50,19 @@ This audit checks open issues and PRs on [openai/codex-plugin-cc](https://github
 | Claim checks flagged honest failed-then-rerun claims | A claim is consistent if any matching run agrees. | `f269ceb` |
 | A ticket turn stopped by usage limits recorded no `errorMessage`, and its card hid Codex's reset time (observed on a real quota hit) | Codex's error text is persisted on the job and shown on the card | `ec5025d` |
 | Ticket monitor never armed: `on-skill-invoke` matches the dispatched, plugin-namespaced skill name exactly (found by the interactive live check) | Both name forms are registered, and `watch` claims notifications so watchers never double-notify | `54f68d3` |
-| Broker leaked a subagent thread whose `thread/started` arrived after its parent's last client disconnected (the "flaky" broker test; recurred under load) | An unowned new thread is released immediately; a deterministic late-subagent test fails on the old code | this checkpoint |
-| Test suite leaked about 300 temp and state dirs per run | Temp dirs and their state dirs are removed on exit | this checkpoint |
+| Broker leaked a subagent thread whose `thread/started` arrived after its parent's last client disconnected (the "flaky" broker test; recurred under load) | An unowned new thread is released immediately; a deterministic late-subagent test fails on the old code | `435b51a` (an incomplete case was found by review; see below) |
+| Test suite leaked about 300 temp and state dirs per run | Temp dirs and their state dirs are removed on exit | `435b51a` |
+| `doctor` treated a closed shared-checkout ticket's workdir (the lead's checkout) as a retained worktree (found by the lead in the integrated `retention` change) | Only tickets with a real worktree record are listed; regression assertion fails on the old code | this checkpoint |
+
+## Open: Codex `review-today` findings on the lead's `a7908ae..e76bf8a`
+
+Fixes for 1–5 are drafted, untested and unmerged, on branch `wip/review-today-fixes` (`fded592`). The Codex ticket `review-today` stays open for a re-review.
+
+| # | Severity | Finding |
+| --- | --- | --- |
+| 1 | Medium | `watch` claims `notifiedAt` before writing. A failed write, or a turn that finished before the watcher armed, is never announced. |
+| 2 | Medium | Broker: a late subagent whose parent has no owners is claimed by whichever client is streaming, not released. |
+| 3 | Low | Recovery gate: the current pid skips recycle detection, and an unreadable marker counts as recycled. |
+| 4 | Low | `model/list` paging cap: an incomplete catalog is cached and rejects valid models. |
+| 5 | Low | `doctor` SemVer: `localeCompare` and large numeric identifiers. |
+| 6 | Low | Test cleanup removes dirs under still-running detached test workers. |
