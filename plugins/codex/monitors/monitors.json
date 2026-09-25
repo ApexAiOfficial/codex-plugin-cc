@@ -3,6 +3,12 @@
     "name": "codex-ticket-events",
     "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs\" watch",
     "description": "Codex ticket turns that finished and need review",
+    "when": "on-skill-invoke:codex:codex-delegation"
+  },
+  {
+    "name": "codex-ticket-events-bare",
+    "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs\" watch",
+    "description": "Codex ticket turns that finished and need review",
     "when": "on-skill-invoke:codex-delegation"
   }
 ]

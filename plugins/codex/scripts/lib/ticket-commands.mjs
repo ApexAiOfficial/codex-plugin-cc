@@ -178,11 +178,13 @@ function readBrief(cwd, options, positionals) {
   return positionals.join(" ") || readStdinIfPiped();
 }
 
-function markJob(workspaceRoot, jobId, field) {
+/** Set `field` once, under the state lock; true only for the caller that set it. */
+function markJob(workspaceRoot, jobId, field, { unless = [] } = {}) {
   if (!jobId) {
-    return;
+    return false;
   }
-  updateJobFile(workspaceRoot, jobId, (job) => (job && !job[field] ? { ...job, [field]: nowIso() } : null));
+  const blocked = (job) => !job || job[field] || unless.some((other) => job[other]);
+  return Boolean(updateJobFile(workspaceRoot, jobId, (job) => (blocked(job) ? null : { ...job, [field]: nowIso() })));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1154,11 +1156,15 @@ async function handleWatch(argv, ctx) {
         if (previous === signature || ticket.state !== "needs-review" || !ticket.lastJobId) {
           continue;
         }
+        // Claim first: several watchers can be armed at once (the monitor has one entry per skill
+        // name form), and a turn Claude already saw through wait/show needs no notification.
+        if (!markJob(workspaceRoot, ticket.lastJobId, "notifiedAt", { unless: ["collectedAt"] })) {
+          continue;
+        }
         const summary = ticket.lastSummary ? ` — ${shorten(ticket.lastSummary, 160).replace(/[.\s]+$/, "")}` : "";
         process.stdout.write(
           `Codex ticket ${ticket.id} finished turn ${ticket.turns?.length ?? "?"}: ${ticket.lastOutcome}${summary}. Review: node ${companion} show ${ticket.id}\n`
         );
-        markJob(workspaceRoot, ticket.lastJobId, "notifiedAt");
       }
     } catch {
       // A transient read error must never kill the monitor.
