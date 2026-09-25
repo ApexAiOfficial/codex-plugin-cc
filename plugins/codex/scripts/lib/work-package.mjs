@@ -117,6 +117,32 @@ export function buildWorkPackagePrompt(rootDir, ticket, preflight) {
   });
 }
 
+/**
+ * When a ticket's Codex thread cannot be resumed, a fresh thread gets the full work package plus a
+ * factual handoff of earlier turns, so the package continues instead of starting over blind.
+ */
+export function buildResumeHandoffBlock(ticket, previousTurns, reason) {
+  const lines = [
+    "<previous_turns>",
+    `This package already ran ${previousTurns.length} turn(s) on another Codex thread that could no longer be resumed (${reason}). The working directory contains everything that thread changed. Handoff of what it reported:`
+  ];
+  for (const entry of previousTurns) {
+    const report = entry.report;
+    lines.push(`Turn ${entry.turn} (${entry.outcome ?? "unknown outcome"}): ${report?.summary || entry.summary || "no summary"}`);
+    for (const change of (report?.changes ?? []).slice(0, 12)) {
+      lines.push(`- changed ${change.path}: ${change.description}`);
+    }
+    for (const blocker of report?.blockers ?? []) {
+      lines.push(`- blocker [${blocker.kind}]: ${blocker.detail}`);
+    }
+    if (entry.feedback) {
+      lines.push(`- lead feedback given for this turn: ${entry.feedback}`);
+    }
+  }
+  lines.push("Verify the current state of the files yourself before relying on this summary.", "</previous_turns>");
+  return lines.join("\n");
+}
+
 export function buildFollowupPrompt(rootDir, ticket, { feedback, turn, verification }) {
   let verificationBlock = "";
   const failing = (verification?.results ?? []).filter((result) => result.exitCode !== 0);

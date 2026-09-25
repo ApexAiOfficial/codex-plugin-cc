@@ -142,6 +142,11 @@ export function renderTurnCard(ticket, job, payload, { companion }) {
     [describeWhere(ticket), elapsedBetween(job?.startedAt, job?.completedAt), payload?.runtime?.model].filter(Boolean).join(" · ")
   ];
 
+  if (payload?.threadReset) {
+    lines.push(
+      `Thread reset: ${payload.threadReset.previousThreadId} could not be resumed (${shorten(payload.threadReset.reason, 120)}); this turn ran on a fresh thread with a handoff of earlier turns.`
+    );
+  }
   if (report?.summary) {
     lines.push(`Summary: ${report.summary}`);
   } else if (payload?.rawOutput) {
