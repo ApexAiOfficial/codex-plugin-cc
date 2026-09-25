@@ -49,6 +49,28 @@ function integratedRef(repoRoot, ticketId) {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
+function leaveInterruptedJournal(fixture, firstTarget, laterTarget) {
+  const originalRmSync = fs.rmSync;
+  let phase = "apply";
+  fs.rmSync = function rmSyncWithInterruptedRollback(filePath, ...args) {
+    const resolved = path.resolve(filePath);
+    if (phase === "apply" && resolved === laterTarget) {
+      phase = "rollback";
+      throw new Error("injected apply failure");
+    }
+    if (phase === "rollback" && resolved === firstTarget) {
+      phase = "recover";
+      throw new Error("injected rollback interruption");
+    }
+    return originalRmSync.call(this, filePath, ...args);
+  };
+  try {
+    assert.throws(() => integrateWorktree(fixture), /rollback was incomplete/);
+  } finally {
+    fs.rmSync = originalRmSync;
+  }
+}
+
 test("integration refuses a target beneath a symlinked lead directory", { skip: process.platform === "win32" }, () => {
   const fixture = setupFixture({ "src/nested/value.txt": "base\n" }, "symlink-parent");
   writeWorktreeFile(fixture.worktree, "src/nested/value.txt", "ticket\n");
@@ -110,49 +132,49 @@ test("leftover integration journals restore targets and are removed", () => {
   const firstTarget = path.join(fixture.repoRoot, "a-first.txt");
   const laterTarget = path.join(fixture.repoRoot, "z-later.txt");
 
-  function leaveInterruptedJournal() {
-    const originalWriteFileSync = fs.writeFileSync;
-    let phase = "apply";
-    fs.writeFileSync = function writeFileSyncWithInterruptedRollback(filePath, ...args) {
-      const resolved = path.resolve(filePath);
-      if (phase === "apply" && resolved === laterTarget) {
-        phase = "rollback";
-        throw new Error("injected apply failure");
-      }
-      if (phase === "rollback" && resolved === firstTarget) {
-        phase = "recover";
-        throw new Error("injected rollback interruption");
-      }
-      return originalWriteFileSync.call(this, filePath, ...args);
-    };
-    try {
-      assert.throws(() => integrateWorktree(fixture), /rollback was incomplete/);
-    } finally {
-      fs.writeFileSync = originalWriteFileSync;
-    }
-  }
-
-  leaveInterruptedJournal();
+  leaveInterruptedJournal(fixture, firstTarget, laterTarget);
 
   assert.equal(fs.existsSync(path.join(fixture.journalDir, "manifest.json")), true);
-  assert.equal(fs.existsSync(firstTarget), false, "the simulated kill leaves the interrupted target for recovery");
+  assert.equal(fs.readFileSync(firstTarget, "utf8"), "first ticket\n");
+  assert.equal(fs.readFileSync(laterTarget, "utf8"), "later base\n");
 
   const recovery = recoverInterruptedIntegration(fixture);
 
   assert.equal(recovery.recovered, true);
-  assert.deepEqual(recovery.restored, ["a-first.txt", "z-later.txt"]);
+  assert.deepEqual(recovery.restored, ["a-first.txt"]);
   assert.equal(fs.readFileSync(firstTarget, "utf8"), "first base\n");
   assert.equal(fs.readFileSync(laterTarget, "utf8"), "later base\n");
   assert.equal(fs.existsSync(fixture.journalDir), false);
   assert.equal(integratedRef(fixture.repoRoot, fixture.ticketId), null);
 
-  leaveInterruptedJournal();
+  leaveInterruptedJournal(fixture, firstTarget, laterTarget);
   const integrated = integrateWorktree(fixture);
   assert.equal(integrated.recovery.recovered, true);
-  assert.deepEqual(integrated.recovery.restored, ["a-first.txt", "z-later.txt"]);
+  assert.deepEqual(integrated.recovery.restored, ["a-first.txt"]);
   assert.equal(fs.readFileSync(firstTarget, "utf8"), "first ticket\n");
   assert.equal(fs.readFileSync(laterTarget, "utf8"), "later ticket\n");
   assert.equal(fs.existsSync(fixture.journalDir), false);
+});
+
+test("recovery preserves a lead edit made after an interrupted integration", () => {
+  const fixture = setupFixture({ "a-first.txt": "first base\n", "z-later.txt": "later base\n" }, "recover-diverged");
+  writeWorktreeFile(fixture.worktree, "a-first.txt", "first ticket\n");
+  writeWorktreeFile(fixture.worktree, "z-later.txt", "later ticket\n");
+  const firstTarget = path.join(fixture.repoRoot, "a-first.txt");
+  const laterTarget = path.join(fixture.repoRoot, "z-later.txt");
+
+  leaveInterruptedJournal(fixture, firstTarget, laterTarget);
+  fs.writeFileSync(firstTarget, "lead edit after interruption\n");
+
+  assert.throws(() => integrateWorktree(fixture), (error) => {
+    assert.equal(error.code, "ERR_INTEGRATION_RECOVERY_CONFLICT");
+    assert.deepEqual(error.paths, ["a-first.txt"]);
+    return true;
+  });
+  assert.equal(fs.readFileSync(firstTarget, "utf8"), "lead edit after interruption\n");
+  assert.equal(fs.readFileSync(laterTarget, "utf8"), "later base\n");
+  assert.equal(fs.existsSync(path.join(fixture.journalDir, "manifest.json")), true);
+  assert.equal(integratedRef(fixture.repoRoot, fixture.ticketId), null);
 });
 
 test("a clean integration applies normally and removes its journal", () => {

@@ -578,6 +578,35 @@ rl.on("line", (line) => {
 	        saveState(state);
 	        send({ id: message.id, result: { turn: buildTurn(turnId) } });
 
+        if (BEHAVIOR === "failed-turn") {
+          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+          send({
+            method: "item/completed",
+            params: {
+              threadId: thread.id,
+              turnId,
+              item: {
+                type: "agentMessage",
+                id: "msg_" + turnId,
+                text: JSON.stringify({ error: { message: "request could not be completed" } }, null, 2),
+                phase: "final_answer"
+              }
+            }
+          });
+          send({
+            method: "turn/completed",
+            params: {
+              threadId: thread.id,
+              turn: buildTurn(turnId, "failed", {
+                message: "usage limit reached",
+                codexErrorInfo: "usageLimitExceeded",
+                additionalDetails: null
+              })
+            }
+          });
+          break;
+        }
+
         const outputProperties = message.params.outputSchema && message.params.outputSchema.properties;
         if (outputProperties && outputProperties.blockers) {
           const work = runWorkTurn(state, thread, turnId, prompt);
