@@ -399,3 +399,39 @@ test("model choices are validated against the discovered catalog", async () => {
   assert.match(validateModelChoice(catalog, { effort: "ultra" }), /Model sol does not support effort "ultra"/);
   assert.equal(validateModelChoice({ ...catalog, configured: { model: null } }, { effort: "ultra" }), null);
 });
+
+// Regression (review-today turn 3): a failed confirmation of a delivered notification was dropped
+// silently, so the pending claim lapsed when the watcher exited and the turn was announced again.
+// Settlement now reports failure, and the watcher retries it while it lives.
+test("a failed notification confirmation is reported for retry, then confirmed", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const fs = (await import("node:fs")).default;
+  const { makeTempDir } = await import("./helpers.mjs");
+  const { readJobFile, resolveJobFile, resolveJobsDir, writeJobFile } = await import("../plugins/codex/scripts/lib/state.mjs");
+  const { getProcessStartMarker } = await import("../plugins/codex/scripts/lib/process.mjs");
+  const { isTurnNotified, settleTurnNotification } = await import("../plugins/codex/scripts/lib/ticket-commands.mjs");
+  const previous = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = makeTempDir();
+  try {
+    const workspace = makeTempDir();
+    const pending = { pid: process.pid, marker: getProcessStartMarker(process.pid) };
+    writeJobFile(workspace, "job-1", { id: "job-1", status: "completed", notifiedAt: new Date().toISOString(), notifyPending: pending });
+    const jobs = resolveJobsDir(workspace);
+    fs.chmodSync(jobs, 0o555);
+    try {
+      assert.equal(settleTurnNotification(workspace, "job-1", true), false, "the failed write is reported, not swallowed");
+    } finally {
+      fs.chmodSync(jobs, 0o755);
+    }
+    assert.deepEqual(readJobFile(resolveJobFile(workspace, "job-1")).notifyPending, pending, "still pending, so it can be retried");
+    assert.equal(settleTurnNotification(workspace, "job-1", true), true);
+    const settled = readJobFile(resolveJobFile(workspace, "job-1"));
+    assert.equal(settled.notifyPending, undefined);
+    assert.equal(isTurnNotified(settled), true, "confirmed deliveries stay notified after the watcher exits");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    } else {
+      process.env.CLAUDE_PLUGIN_DATA = previous;
+    }
+  }
+});
