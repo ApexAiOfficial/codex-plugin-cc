@@ -271,6 +271,10 @@ test("infrastructure failures are classified separately from bad work", () => {
   const { waited } = delegateAndWait(ctx, ["--ticket", "quota", "Anything.\nFAKE_TURN_FAIL"]);
   assert.equal(waited.ticket.lastOutcome, "quota");
   assert.equal(waited.job.failureKind, "quota");
+  // Codex's own message (in real use it says when the limit resets) reaches the job and the card.
+  assert.match(waited.job.errorMessage, /usage limit reached/);
+  const card = companion(["show", "quota"], { cwd: ctx.repo, env: ctx.env });
+  assert.match(card.stdout, /stopped by usage limits[\s\S]*Error: usage limit reached/);
 });
 
 test("steer delivers a message into the running turn", async () => {

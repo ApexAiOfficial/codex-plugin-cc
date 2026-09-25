@@ -530,6 +530,8 @@ export async function runTicketTurn(request, ctx, { progress, jobId }) {
       payload,
       rendered,
       summary: parsed.report?.summary || shorten(firstLine(result.finalMessage), 160) || `Ticket ${ticket.id} turn ${request.turn} finished.`,
+      // Codex's own text matters most for quota ("try again at 11:10 PM") and auth failures.
+      errorMessage: failureKind ? payload.turnError?.message ?? null : null,
       failureKind
     };
   } finally {

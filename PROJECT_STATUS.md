@@ -60,6 +60,7 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 - `doctor` / `/codex:doctor`: a read-only runtime health diagnostic (the only new public command).
 - Stale-lock recovery serialized through a recovery gate. This fixes a reproduced race that admitted multiple lock holders.
 - Linux is the reference platform (decision from the `linux-platform` investigation): capability-detected enhancements with portable fallbacks.
+- Broker lifecycle recovery drilled on real processes (`tests/drills/broker-drill.mjs`): app-server death, broker death, SessionEnd while busy, idle exit.
 
 ## Incomplete / next
 
@@ -90,20 +91,20 @@ The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open 
 - The monitor depends on the experimental plugin-monitor feature (interactive CLI only); `wait` and the Stop nudge are the fallbacks.
 - The fork's marketplace name is still `openai-codex`, the same as upstream, so installing both through marketplaces would collide. Use `--plugin-dir` for testing.
 - Test suite runtime is about 2.5 min, and the timing-sensitive upstream tests remain.
-- On this machine the Codex CLI (0.144.1) cannot resume some threads written alongside the desktop app's newer Codex. Tickets fall back to a fresh thread, which loses the thread's conversational context but not the code or the report handoff. Updating the CLI, or pointing `CODEX_COMPANION_CODEX_BIN` at the newer binary, avoids it.
+- An older Codex cannot resume threads a newer Codex wrote into the shared `~/.codex`. This was measured with 0.144.1 against the desktop app's 0.155-alpha, and resolved here by updating the CLI to 0.156.1. If the desktop app later moves ahead again, tickets fall back to a fresh thread with a handoff, and `doctor` warns.
 - A foreground `/codex:rescue` still runs inside a subagent Bash call and is bounded by its timeout.
 
 ## Validation status
 
 At the most recent commit on `orchestration` (see `CHECKPOINT_HANDOFF.md` for the exact SHA and results):
-- `npm test`: 175 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
+- `npm test`: 176 tests passing. Suites: upstream-derived runtime/commands/git/state, `orchestration`, `orchestration-units`, `substrate`, `worktree-safety`, `stock-runtime`.
 - `npm run build` (tsc check): passes.
 - A full test run leaves no stray processes. The harness stops brokers on exit and on signals.
 - Dogfooded against real Codex CLI 0.144.1 with 5 tickets: 1 review, 3 implement, and 1 implement that went through two rejection→followup cycles. The dogfood covered integrate, verify, a monitor notification, the resume fallback, and close/purge. Every accepted change passed independent verification outside the sandbox.
 
 ## Runtime assumptions
 
-- Node ≥ 18.18 (developed on 22), git ≥ 2.38, Codex CLI with `app-server` (developed against 0.144.1).
+- Node ≥ 18.18 (developed on 22), git ≥ 2.38, Codex CLI with `app-server`. Developed against 0.144.1, and on 0.156.1 since 2026-09-24. The companion's Codex should be at least as new as any other Codex sharing `~/.codex`.
 - Claude Code with plugin hooks. Monitors are experimental; `CLAUDE_ENV_FILE` is used for env export.
 - The Codex sandbox as measured on Linux: no network by default, `.git` read-only, cwd and `/tmp` writable, Docker daemon unreachable.
 

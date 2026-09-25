@@ -271,10 +271,36 @@ test("runtime skew, stale locks, inconsistent tickets, missing worktrees, and cl
 
   assert.equal(finding(report, "codex-version-skew").status, "WARN");
   assert.match(finding(report, "codex-version-skew").summary, /cannot be resumed.*fresh threads/i);
+  assert.equal(finding(report, "codex-version-skew").data.direction, "unknown");
   assert.equal(finding(report, "state-lock").data.identity, "gone");
   assert.equal(finding(report, "open-ticket").data.inconsistent, true);
   assert.equal(finding(report, "missing-recorded-worktrees").status, "FAIL");
   assert.deepEqual(finding(report, "closed-ticket-refs").data.refs, ["refs/codex-companion/tickets/closed-ticket/base"]);
   assert.equal(report.ok, false);
   assert.deepEqual(snapshotTree(ctx.stateDir), before);
+}));
+
+test("version skew is a warning only when the companion's Codex is the older one", async () => withWorkspace(async (ctx) => {
+  fs.mkdirSync(path.join(ctx.env.HOME, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(ctx.env.HOME, ".codex", "config.toml"), 'CODEX_CLI_PATH = "/desktop/codex"\n', "utf8");
+  const cases = [
+    // [companion, CODEX_CLI_PATH, status, direction]
+    ["codex-cli 0.144.1", "codex-cli 0.155.0-alpha.16.4", "WARN", "older"],
+    ["codex-cli 0.156.1", "codex-cli 0.155.0-alpha.16.4", "OK", "newer"],
+    ["codex-cli 0.156.0-alpha.3", "codex-cli 0.156.0", "WARN", "older"],
+    ["codex-cli 0.156.0-alpha.10", "codex-cli 0.156.0-alpha.9", "OK", "newer"],
+    ["codex-cli 0.156.0", "codex-cli 0.156.0 (build 7)", "OK", "same"]
+  ];
+  for (const [companionVersion, configuredVersion, status, direction] of cases) {
+    const report = await doctor(ctx, {
+      binaryAvailableImpl: (command) => ({ available: true, detail: command === "/desktop/codex" ? configuredVersion : companionVersion })
+    });
+    const skew = finding(report, "codex-version-skew");
+    assert.equal(skew.status, status, `${companionVersion} vs ${configuredVersion}`);
+    assert.equal(skew.data.direction, direction, `${companionVersion} vs ${configuredVersion}`);
+    if (direction === "older") {
+      assert.match(skew.summary, /cannot be resumed.*fresh threads/i);
+      assert.match(skew.fix, /codex update/);
+    }
+  }
 }));

@@ -151,8 +151,8 @@ export function renderTurnCard(ticket, job, payload, { companion }) {
     lines.push(`Summary: ${report.summary}`);
   } else if (payload?.rawOutput) {
     lines.push(`Final message: ${shorten(payload.rawOutput, 400)}`);
-  } else if (job?.errorMessage) {
-    lines.push(`Error: ${shorten(job.errorMessage, 400)}`);
+  } else if (job?.errorMessage || payload?.turnError?.message) {
+    lines.push(`Error: ${shorten(job?.errorMessage || payload.turnError.message, 400)}`);
   }
 
   if (evidence) {
