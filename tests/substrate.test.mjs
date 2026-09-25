@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { initGitRepo, makeTempDir } from "./helpers.mjs";
 import { installSubstrateFake } from "./substrate-fake.mjs";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
-import { ensureBrokerSession, loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { ensureBrokerSession, loadBrokerSession, saveBrokerSession, sendBrokerShutdown } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { runAppServerTurn } from "../plugins/codex/scripts/lib/codex.mjs";
 import { getProcessStartMarker, isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
 import { resolveTicketFile } from "../plugins/codex/scripts/lib/state.mjs";
@@ -239,6 +239,30 @@ test("metadata of a dead broker is replaced by a fresh broker", () =>
     const fresh = await ensureBrokerSession(dir, { env: process.env, probeTimeoutMs: 200 });
     assert.ok(fresh && fresh.pid !== dead.pid);
     assert.equal(loadBrokerSession(dir).pid, fresh.pid);
+  }));
+
+test("an idle-only shutdown request never stops a broker another client is using", (t) =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
+    const dir = repo();
+    const { session, client } = await brokerClient(dir, t);
+    await client.request("thread/start", {});
+    assert.deepEqual(await sendBrokerShutdown(session.endpoint, { ifIdle: true }), { shutdown: false });
+    assert.equal(isProcessAlive(session.pid), true);
+    await client.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(await sendBrokerShutdown(session.endpoint, { ifIdle: true }), { shutdown: true });
+    await waitFor(() => !isProcessAlive(session.pid));
+  }));
+
+test("a broker with no clients exits on its own after the idle period", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "normal", CODEX_COMPANION_BROKER_IDLE_MS: "400" }, async () => {
+    const dir = repo();
+    const session = await ensureBrokerSession(dir, { env: process.env });
+    const client = await CodexAppServerClient.connect(dir, { brokerEndpoint: session.endpoint });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    assert.equal(isProcessAlive(session.pid), true, "a connected client keeps it alive");
+    await client.close();
+    await waitFor(() => !isProcessAlive(session.pid), { timeoutMs: 5000 });
   }));
 
 test("concurrent callers share one broker instead of racing to create several", () =>

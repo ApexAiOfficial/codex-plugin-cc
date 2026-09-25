@@ -48,19 +48,37 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
   return false;
 }
 
-export async function sendBrokerShutdown(endpoint) {
-  await new Promise((resolve) => {
+/**
+ * Ask the broker to exit. With `ifIdle`, a broker still serving other clients declines; the result
+ * says whether it shut down (true when it is unreachable, since there is nothing left to stop).
+ */
+export async function sendBrokerShutdown(endpoint, options = {}) {
+  return new Promise((resolve) => {
+    let answered = false;
+    let buffer = "";
     const socket = connectToEndpoint(endpoint);
     socket.setEncoding("utf8");
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
+      socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: options.ifIdle ? { ifIdle: true } : {} })}\n`);
     });
-    socket.on("data", () => {
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (!buffer.includes("\n") || answered) {
+        return;
+      }
+      answered = true;
+      let shutdown = true;
+      try {
+        shutdown = JSON.parse(buffer.slice(0, buffer.indexOf("\n")))?.result?.shutdown !== false;
+      } catch {
+        // An unparseable answer comes from an older broker, which always shuts down.
+      }
       socket.end();
-      resolve();
+      resolve({ shutdown });
     });
-    socket.on("error", resolve);
-    socket.on("close", resolve);
+    socket.on("error", () => resolve({ shutdown: true, unreachable: true }));
+    // Closing without an answer means the broker is already gone (resolve is a no-op once answered).
+    socket.on("close", () => resolve({ shutdown: true }));
   });
 }
 
