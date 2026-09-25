@@ -32,6 +32,7 @@
  *   fileChanges: ThreadItem[],
  *   commandExecutions: ThreadItem[],
  *   tokenUsage: import("./app-server-protocol").ThreadTokenUsage | null,
+ *   lastActivityAt?: number,
  *   onProgress: ProgressReporter | null
  * }} TurnCaptureState
  */
@@ -81,6 +82,26 @@ function buildResumeParams(threadId, cwd, options = {}) {
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only"
   };
+}
+
+/**
+ * Per-turn sandbox policy for a sandbox mode. Network access follows what the thread was granted
+ * by configuration only when the thread already runs under the same kind of policy.
+ */
+function buildTurnSandboxPolicy(cwd, mode, threadSandbox = null) {
+  if (mode === "workspace-write") {
+    return {
+      type: "workspaceWrite",
+      writableRoots: [path.resolve(cwd)],
+      networkAccess: threadSandbox?.type === "workspaceWrite" && threadSandbox.networkAccess === true,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false
+    };
+  }
+  if (mode === "danger-full-access") {
+    return { type: "dangerFullAccess" };
+  }
+  return { type: "readOnly", networkAccess: threadSandbox?.type === "readOnly" && threadSandbox.networkAccess === true };
 }
 
 /** @returns {UserInput[]} */
@@ -248,8 +269,11 @@ function describeStartedItem(state, item) {
         message: `Running command: ${shorten(item.command, 96)}`,
         phase: looksLikeVerificationCommand(item.command) ? "verifying" : "running"
       };
-    case "fileChange":
-      return { message: `Applying ${item.changes.length} file change(s).`, phase: "editing" };
+    case "fileChange": {
+      // item/started can arrive before the change list exists.
+      const count = Array.isArray(item.changes) ? item.changes.length : 0;
+      return { message: count ? `Applying ${count} file change(s).` : "Applying file changes.", phase: "editing" };
+    }
     case "mcpToolCall":
       return { message: `Calling ${item.server}/${item.tool}.`, phase: "investigating" };
     case "dynamicToolCall":
@@ -537,8 +561,13 @@ function applyTurnNotification(state, message) {
       }
       break;
     case "error":
+      if (message.params.willRetry) {
+        // Transient: Codex retries within the same turn, which may still succeed.
+        emitProgress(state.onProgress, `Codex error (retrying): ${shorten(message.params.error?.message, 160)}`);
+        break;
+      }
       state.error = message.params.error;
-      emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
+      emitProgress(state.onProgress, `Codex error: ${shorten(message.params.error?.message, 160)}`, "failed");
       break;
     case "thread/tokenUsage/updated":
       if ((message.params.threadId ?? null) === state.threadId) {
@@ -563,11 +592,114 @@ function applyTurnNotification(state, message) {
   }
 }
 
+const TURN_PROBE_ENV = "CODEX_COMPANION_TURN_PROBE_MS";
+// After this much silence, ask the app-server whether the turn is still running. Silence alone is
+// normal (long reasoning, long test runs emit no notifications), so it never fails a turn by itself.
+const DEFAULT_TURN_PROBE_MS = 120000;
+const TURN_PROBE_RPC_TIMEOUT_MS = 30000;
+const MAX_FAILED_TURN_PROBES = 2;
+
+function resolveTurnProbeMs() {
+  const configured = process.env[TURN_PROBE_ENV];
+  if (configured != null && configured !== "") {
+    return Math.max(0, Number(configured) || 0);
+  }
+  return DEFAULT_TURN_PROBE_MS;
+}
+
+/**
+ * Turn liveness, separate from process liveness: fail fast if the connection dies mid-turn, and
+ * when the turn goes quiet ask the app-server (thread/read) whether it is still active. A thread
+ * that is no longer active without a completion event means the completion was lost; recover it
+ * from the thread record. Only an app-server that stops answering is treated as dead.
+ */
+function startTurnWatchdog(client, state) {
+  let rejectFailure;
+  const failure = new Promise((_, reject) => {
+    rejectFailure = reject;
+  });
+  void failure.catch(() => {});
+  let stopped = false;
+  let timer = null;
+  let failedProbes = 0;
+  const probeMs = resolveTurnProbeMs();
+
+  const fail = (message) => {
+    if (!stopped && !state.completed) {
+      stopped = true;
+      rejectFailure(new Error(message));
+    }
+  };
+
+  client.exitPromise?.then(() => {
+    const detail = client.exitError?.message ? ` ${client.exitError.message}` : "";
+    fail(`The Codex app-server connection closed before the turn completed.${detail}`);
+  });
+
+  const probe = async () => {
+    timer = null;
+    if (stopped || state.completed) {
+      return;
+    }
+    if (!state.turnId || Date.now() - state.lastActivityAt < probeMs) {
+      schedule();
+      return;
+    }
+    try {
+      const { thread } = await client.request("thread/read", { threadId: state.threadId }, { timeoutMs: TURN_PROBE_RPC_TIMEOUT_MS });
+      failedProbes = 0;
+      if (thread?.status?.type === "active") {
+        state.lastActivityAt = Date.now();
+      } else if (!state.completed) {
+        const withTurns = await client.request(
+          "thread/read",
+          { threadId: state.threadId, includeTurns: true },
+          { timeoutMs: TURN_PROBE_RPC_TIMEOUT_MS }
+        );
+        const turn = (withTurns.thread?.turns ?? []).find((candidate) => candidate.id === state.turnId);
+        if (turn && turn.status !== "inProgress") {
+          emitProgress(state.onProgress, `Recovered turn ${turn.id} (${turn.status}) after its completion event was lost.`, "finalizing");
+          completeTurn(state, turn);
+          return;
+        }
+        fail(`The Codex thread is ${thread?.status?.type ?? "unknown"} but turn ${state.turnId} never reported completion.`);
+        return;
+      }
+    } catch (error) {
+      failedProbes += 1;
+      if (failedProbes >= MAX_FAILED_TURN_PROBES) {
+        fail(`The Codex app-server stopped responding during the turn: ${error.message}`);
+        return;
+      }
+    }
+    schedule();
+  };
+  const schedule = () => {
+    if (!stopped && probeMs > 0) {
+      timer = setTimeout(probe, Math.max(250, Math.min(probeMs, probeMs - (Date.now() - state.lastActivityAt))));
+      timer.unref?.();
+    }
+  };
+  schedule();
+
+  return {
+    failure,
+    stop() {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  };
+}
+
 async function captureTurn(client, threadId, startRequest, options = {}) {
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
+  state.lastActivityAt = Date.now();
 
   client.setNotificationHandler((message) => {
+    state.lastActivityAt = Date.now();
     if (!state.turnId) {
       state.bufferedNotifications.push(message);
       return;
@@ -588,6 +720,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     applyTurnNotification(state, message);
   });
 
+  let watchdog = null;
   try {
     const response = await startRequest();
     options.onResponse?.(response, state);
@@ -613,8 +746,10 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       completeTurn(state, response.turn);
     }
 
-    return await state.completion;
+    watchdog = startTurnWatchdog(client, state);
+    return await Promise.race([state.completion, watchdog.failure]);
   } finally {
+    watchdog?.stop();
     clearCompletionTimer(state);
     options.onTurnFinished?.();
     client.setNotificationHandler(previousHandler ?? null);
@@ -766,7 +901,8 @@ async function resumeThread(client, threadId, cwd, options = {}) {
 }
 
 function buildResultStatus(turnState) {
-  return turnState.finalTurn?.status === "completed" ? 0 : 1;
+  // A non-retryable error fails the run even when completion was only inferred as "completed".
+  return turnState.finalTurn?.status === "completed" && !turnState.error ? 0 : 1;
 }
 
 const BUILTIN_PROVIDER_LABELS = new Map([
@@ -1149,11 +1285,11 @@ export async function runAppServerTurn(cwd, options = {}) {
       input: buildTurnInput(prompt),
       model: options.model ?? null,
       effort: options.effort ?? null,
-      outputSchema: options.outputSchema ?? null
+      outputSchema: options.outputSchema ?? null,
+      // Always explicit: a live thread keeps the sandbox of earlier turns across thread/resume, and a
+      // per-turn override persists to later turns, so privilege must be decided on every turn.
+      sandboxPolicy: options.sandboxPolicy ?? buildTurnSandboxPolicy(cwd, options.sandbox, threadResponse?.sandbox)
     };
-    if (options.sandboxPolicy) {
-      turnParams.sandboxPolicy = options.sandboxPolicy;
-    }
     const turnState = await captureTurn(client, threadId, () => client.request("turn/start", turnParams), {
       onProgress: options.onProgress,
       onTurnStarted: (turn) => options.controller?.attach({ client, ...turn }),

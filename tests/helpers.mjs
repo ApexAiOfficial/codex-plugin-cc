@@ -57,6 +57,13 @@ function shutDownTestBrokers() {
 }
 
 process.on("exit", shutDownTestBrokers);
+// A test file killed by a timeout or Ctrl-C must not strand brokers either.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.once(signal, () => {
+    shutDownTestBrokers();
+    process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
+  });
+}
 
 export function writeExecutable(filePath, source) {
   fs.writeFileSync(filePath, source, { encoding: "utf8", mode: 0o755 });

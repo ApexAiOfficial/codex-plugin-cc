@@ -5,7 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { terminateProcessTree } from "./lib/process.mjs";
+import { terminateRecordedProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
 import {
   clearBrokerSession,
@@ -83,6 +83,7 @@ async function handleSessionEnd(input) {
   const logFile = brokerSession?.logFile ?? null;
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
+  const pidMarker = brokerSession?.pidMarker ?? null;
 
   if (brokerEndpoint) {
     await sendBrokerShutdown(brokerEndpoint);
@@ -97,7 +98,8 @@ async function handleSessionEnd(input) {
     logFile,
     sessionDir,
     pid,
-    killProcess: terminateProcessTree
+    // The broker normally exits on broker/shutdown; only signal the pid if it is still that broker.
+    killProcess: (target) => terminateRecordedProcessTree(target, pidMarker, { commandHint: "app-server-broker.mjs" })
   });
   clearBrokerSession(cwd);
 }

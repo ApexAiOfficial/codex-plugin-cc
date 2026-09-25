@@ -1,0 +1,246 @@
+import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+
+import { initGitRepo, makeTempDir } from "./helpers.mjs";
+import { installSubstrateFake } from "./substrate-fake.mjs";
+import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
+import { ensureBrokerSession, loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { runAppServerTurn } from "../plugins/codex/scripts/lib/codex.mjs";
+import { getProcessStartMarker, isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
+
+// Regression tests for the transport/broker substrate, cross-checked against upstream reports:
+// openai/codex-plugin-cc #302 (unbounded waits), #453 (zombie broker), #574 (false success),
+// #706/#707 (retained thread subscriptions), #740 (sandbox on live resume), #762/#768 (broker
+// teardown vs readiness), #775 (fileChange without changes).
+
+const binDir = makeTempDir();
+const fake = installSubstrateFake(binDir);
+process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH}`;
+
+async function waitFor(predicate, { timeoutMs = 10000, intervalMs = 50 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const value = await predicate();
+    if (value) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error("Timed out waiting for condition.");
+}
+
+function withEnv(values, fn) {
+  const previous = {};
+  for (const [key, value] of Object.entries(values)) {
+    previous[key] = process.env[key];
+    process.env[key] = value;
+  }
+  const restore = () => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  };
+  return Promise.resolve()
+    .then(fn)
+    .finally(restore);
+}
+
+function repo() {
+  const dir = makeTempDir();
+  initGitRepo(dir);
+  return dir;
+}
+
+function turnStarts(since = 0) {
+  return fake.entries().slice(since).filter((entry) => entry.method === "turn/start");
+}
+
+// ------------------------------------------------------------------------------------------
+// Transport and turn liveness (#302, #453 root cause)
+
+test("an RPC the app-server never answers fails with a bounded timeout", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "hang-thread-start", CODEX_COMPANION_RPC_TIMEOUT_MS: "300" }, async () => {
+    const client = await CodexAppServerClient.connect(repo(), { disableBroker: true });
+    const started = Date.now();
+    await assert.rejects(client.request("thread/start", { cwd: process.cwd() }), /did not answer thread\/start within 300ms/);
+    assert.ok(Date.now() - started < 3000);
+    await client.close();
+  }));
+
+test("requests on a dead connection fail immediately instead of hanging", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "exit-mid-turn", CODEX_COMPANION_RPC_TIMEOUT_MS: "0" }, async () => {
+    const client = await CodexAppServerClient.connect(repo(), { disableBroker: true });
+    const { thread } = await client.request("thread/start", {});
+    await client.request("turn/start", { threadId: thread.id, input: [] });
+    await client.exitPromise;
+    await assert.rejects(client.request("thread/read", { threadId: thread.id }), /exited|closed/);
+    await client.close();
+  }));
+
+test("a turn fails fast when the app-server dies mid-turn", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "exit-mid-turn" }, async () => {
+    const started = Date.now();
+    await assert.rejects(
+      runAppServerTurn(repo(), { prompt: "work", disableBroker: true }),
+      /connection closed before the turn completed/
+    );
+    assert.ok(Date.now() - started < 5000);
+  }));
+
+test("a turn whose completion event is lost is recovered from the thread record", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "lost-completion", CODEX_COMPANION_TURN_PROBE_MS: "300" }, async () => {
+    const result = await runAppServerTurn(repo(), { prompt: "work", disableBroker: true });
+    assert.equal(result.turn.status, "completed");
+    assert.equal(result.status, 0);
+  }));
+
+test("a quiet but active turn is never failed for silence", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "silent-but-active", CODEX_COMPANION_TURN_PROBE_MS: "250" }, async () => {
+    const result = await runAppServerTurn(repo(), { prompt: "think hard", disableBroker: true });
+    assert.equal(result.status, 0);
+    assert.equal(result.finalMessage, "finished after a quiet period");
+    assert.ok(fake.entries().some((entry) => entry.method === "thread/read"), "the watchdog probed instead of assuming");
+  }));
+
+// ------------------------------------------------------------------------------------------
+// Turn result correctness (#574 RC3, #775) and privilege (#740)
+
+test("retryable errors do not fail a turn, fatal errors do even when completion is inferred", async () => {
+  const retried = await withEnv({ FAKE_SUBSTRATE_MODE: "retryable-error" }, () => runAppServerTurn(repo(), { prompt: "work", disableBroker: true }));
+  assert.equal(retried.status, 0);
+  const fatal = await withEnv({ FAKE_SUBSTRATE_MODE: "fatal-error-inferred-completion" }, () =>
+    runAppServerTurn(repo(), { prompt: "work", disableBroker: true })
+  );
+  assert.equal(fatal.status, 1);
+  assert.match(fatal.error.message, /model rejected the request/);
+});
+
+test("a fileChange start event without a change list does not crash the turn", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "filechange-without-changes" }, async () => {
+    const progress = [];
+    const result = await runAppServerTurn(repo(), { prompt: "edit", disableBroker: true, onProgress: (event) => progress.push(event) });
+    assert.equal(result.status, 0);
+    assert.ok(progress.some((event) => (event.message ?? event) === "Applying file changes."));
+  }));
+
+test("every turn sends an explicit sandbox policy, so privilege never carries over from earlier turns", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
+    const dir = repo();
+    const before = fake.entries().length;
+    await runAppServerTurn(dir, { prompt: "read", sandbox: "read-only", disableBroker: true });
+    await runAppServerTurn(dir, { prompt: "write", sandbox: "workspace-write", disableBroker: true });
+    // A resumed thread whose live sandbox is still writable must get an explicit read-only turn.
+    await runAppServerTurn(dir, { prompt: "read again", resumeThreadId: "thr_live", sandbox: "read-only", disableBroker: true });
+    const [readTurn, writeTurn, resumedRead] = turnStarts(before);
+    assert.deepEqual(readTurn.params.sandboxPolicy, { type: "readOnly", networkAccess: false });
+    assert.equal(writeTurn.params.sandboxPolicy.type, "workspaceWrite");
+    assert.deepEqual(writeTurn.params.sandboxPolicy.writableRoots, [path.resolve(dir)]);
+    assert.equal(writeTurn.params.sandboxPolicy.networkAccess, false);
+    assert.deepEqual(resumedRead.params.sandboxPolicy, { type: "readOnly", networkAccess: false });
+  }));
+
+// ------------------------------------------------------------------------------------------
+// Broker lifecycle (#706/#707, #453, #762/#768)
+
+async function brokerClient(dir, t) {
+  const session = await ensureBrokerSession(dir, { env: process.env });
+  assert.ok(session, "a broker should start");
+  const client = await CodexAppServerClient.connect(dir, { brokerEndpoint: session.endpoint });
+  // An open socket keeps the test process alive, so a failed assertion must not strand clients.
+  t.after(() => client.close().catch(() => {}));
+  return { session, client };
+}
+
+test("the broker unsubscribes a thread, and its subagent threads, once the last client disconnects", (t) =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "subagent" }, async () => {
+    const dir = repo();
+    const { client } = await brokerClient(dir, t);
+    const { thread } = await client.request("thread/start", {});
+    await client.request("turn/start", { threadId: thread.id, input: [] });
+    await client.close();
+    const unsubscribed = await waitFor(() => {
+      const ids = fake.entries().filter((entry) => entry.method === "thread/unsubscribe").map((entry) => entry.params.threadId);
+      return ids.includes(thread.id) && ids.length >= 2 ? ids : null;
+    });
+    const child = fake.entries().filter((entry) => entry.method === "thread/unsubscribe").map((entry) => entry.params.threadId).find((id) => id !== thread.id);
+    assert.ok(child, `expected the subagent thread to be released too: ${unsubscribed}`);
+  }));
+
+test("a thread shared by two clients stays subscribed until the second one leaves", (t) =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
+    const dir = repo();
+    const { session, client: first } = await brokerClient(dir, t);
+    const { thread } = await first.request("thread/start", {});
+    const second = await CodexAppServerClient.connect(dir, { brokerEndpoint: session.endpoint });
+    t.after(() => second.close().catch(() => {}));
+    await second.request("thread/resume", { threadId: thread.id });
+    await first.close();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const released = () => fake.entries().some((entry) => entry.method === "thread/unsubscribe" && entry.params.threadId === thread.id);
+    assert.equal(released(), false, "still owned by the second client");
+    await second.close();
+    await waitFor(released);
+  }));
+
+test("a broker exits when its app-server dies, and the next caller gets a healthy broker", (t) =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
+    const dir = repo();
+    const first = await ensureBrokerSession(dir, { env: process.env });
+    const appServerPid = await waitFor(() => fake.entries().filter((entry) => entry.event === "start").at(-1)?.pid);
+    process.kill(appServerPid, "SIGKILL");
+    await waitFor(() => !isProcessAlive(first.pid));
+    const second = await ensureBrokerSession(dir, { env: process.env });
+    assert.ok(second && second.pid !== first.pid);
+    const client = await CodexAppServerClient.connect(dir, { brokerEndpoint: second.endpoint });
+    t.after(() => client.close().catch(() => {}));
+    assert.ok((await client.request("thread/start", {})).thread.id);
+  }));
+
+test("a live broker that misses the readiness probe is never torn down", async (t) => {
+  const dir = repo();
+  // Stand-in for a busy broker: alive, recognisable, but not answering on its endpoint.
+  const busy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "app-server-broker.mjs"], { stdio: "ignore" });
+  t.after(() => busy.kill("SIGKILL"));
+  await waitFor(() => getProcessStartMarker(busy.pid) || process.platform !== "linux");
+  const session = {
+    endpoint: `unix:${path.join(makeTempDir(), "missing.sock")}`,
+    pidFile: null,
+    logFile: null,
+    sessionDir: null,
+    pid: busy.pid,
+    pidMarker: getProcessStartMarker(busy.pid)
+  };
+  saveBrokerSession(dir, session);
+  const result = await ensureBrokerSession(dir, { env: process.env, probeTimeoutMs: 200 });
+  assert.equal(result, null, "the caller falls back to a private app-server");
+  assert.equal(isProcessAlive(busy.pid), true, "the busy broker was not killed");
+  assert.deepEqual(loadBrokerSession(dir), session, "its metadata was kept");
+});
+
+test("metadata of a dead broker is replaced by a fresh broker", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
+    const dir = repo();
+    const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+    await new Promise((resolve) => dead.on("exit", resolve));
+    saveBrokerSession(dir, { endpoint: `unix:${path.join(makeTempDir(), "gone.sock")}`, pid: dead.pid, pidMarker: "linux:0" });
+    const fresh = await ensureBrokerSession(dir, { env: process.env, probeTimeoutMs: 200 });
+    assert.ok(fresh && fresh.pid !== dead.pid);
+    assert.equal(loadBrokerSession(dir).pid, fresh.pid);
+  }));
+
+test("concurrent callers share one broker instead of racing to create several", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "normal" }, async () => {
+    const dir = repo();
+    const sessions = await Promise.all(Array.from({ length: 4 }, () => ensureBrokerSession(dir, { env: process.env })));
+    const endpoints = new Set(sessions.map((session) => session?.endpoint));
+    assert.equal(endpoints.size, 1, `expected one shared broker, got ${[...endpoints].join(", ")}`);
+    assert.ok(fs.existsSync(loadBrokerSession(dir).pidFile));
+  }));
