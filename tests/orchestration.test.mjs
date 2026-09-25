@@ -680,6 +680,34 @@ test("a turn that finished before the watcher armed is announced once, for its o
   assert.doesNotMatch(lines.output, /elsewhere|collected/);
 });
 
+// Regression (re-review): the claim was permanent once set, so a watcher that died, or whose rollback
+// after a failed write also failed, suppressed the turn for every later watcher and the Stop reminder.
+test("a notification claim lapses when the watcher that made it is gone", async (t) => {
+  const ctx = setupRepo();
+  const env = { ...ctx.env, CODEX_COMPANION_SESSION_ID: "sess-lapse" };
+  companionJson(["delegate", "--ticket", "stale", "Work.\nFAKE_WRITE src/s.js 1"], { cwd: ctx.repo, env });
+  companionJson(["delegate", "--ticket", "held", "Work.\nFAKE_WRITE src/h.js 1"], { cwd: ctx.repo, env });
+  await waitFor(() => ["stale", "held"].every((id) => readJobFor(ctx.repo, id).status === "completed"));
+  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((resolve) => dead.on("exit", resolve));
+  const claim = (id, pending) => {
+    const file = resolveJobFile(ctx.repo, readTicketRecord(ctx.repo, id).lastJobId);
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), notifiedAt: new Date().toISOString(), notifyPending: pending }));
+  };
+  claim("stale", { pid: dead.pid, marker: null });
+  // A live claimer (this test process) is still delivering: its turn stays claimed.
+  const { getProcessStartMarker } = await import("../plugins/codex/scripts/lib/process.mjs");
+  claim("held", { pid: process.pid, marker: getProcessStartMarker(process.pid) });
+
+  const watcher = spawn(process.execPath, [SCRIPT, "watch", "--interval-ms", "250"], { cwd: ctx.repo, env });
+  t.after(() => watcher.kill("SIGTERM"));
+  const lines = watchLines(watcher);
+  await waitFor(() => lines.output.includes("Codex ticket stale finished turn 1"), { timeoutMs: 10000 });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.doesNotMatch(lines.output, /ticket held/, "a live watcher's claim is respected");
+  assert.equal(readJobFor(ctx.repo, "stale").notifyPending, undefined, "the new watcher confirmed its delivery");
+});
+
 test("watch emits one notification line per finished ticket turn", async (t) => {
   const ctx = setupRepo();
   delegateAndWait(ctx, ["--ticket", "before", "Old.\nFAKE_WRITE src/o.js 1"]);

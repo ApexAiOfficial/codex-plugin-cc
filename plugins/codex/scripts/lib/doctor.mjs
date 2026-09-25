@@ -136,10 +136,10 @@ function configuredCodexPath(env) {
   return { configPath, binary: match ? (match[1] ?? match[2] ?? match[3]).trim() : null };
 }
 
-/** `codex-cli 0.155.0-alpha.16.4` → { core: [0, 155, 0], pre: ["alpha", "16", "4"] }, or null. */
+/** `codex-cli 0.155.0-alpha.16.4` → { core: ["0", "155", "0"], pre: ["alpha", "16", "4"] }, or null. */
 function parseCodexVersion(detail) {
   const match = firstLine(detail).match(/(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
-  return match ? { core: match.slice(1, 4).map(Number), pre: match[4] ? match[4].split(".") : [] } : null;
+  return match ? { core: match.slice(1, 4), pre: match[4] ? match[4].split(".") : [] } : null;
 }
 
 /** SemVer identifier precedence: numeric ones compare by value (exactly, via length), below alphanumeric ones, which compare in ASCII order. */
@@ -159,8 +159,10 @@ function comparePrereleaseIdentifiers(left, right) {
 /** Semver precedence: negative when `a` is older than `b`, 0 when equal. */
 function compareCodexVersions(a, b) {
   for (let index = 0; index < 3; index += 1) {
-    if (a.core[index] !== b.core[index]) {
-      return a.core[index] - b.core[index];
+    // Decimal strings, compared exactly: SemVer puts no upper bound on major/minor/patch.
+    const order = comparePrereleaseIdentifiers(a.core[index], b.core[index]);
+    if (order !== 0) {
+      return order;
     }
   }
   if (!a.pre.length || !b.pre.length) {

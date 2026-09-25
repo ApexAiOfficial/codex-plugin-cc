@@ -209,6 +209,8 @@ test("an orphan subagent is released even while an unrelated client is streaming
     // Another client starts streaming before the first one's subagent announces itself.
     const second = await CodexAppServerClient.connect(dir, { brokerEndpoint: session.endpoint });
     t.after(() => second.close().catch(() => {}));
+    const delivered = [];
+    second.setNotificationHandler((message) => delivered.push(message));
     const { thread: other } = await second.request("thread/start", {});
     await second.request("turn/start", { threadId: other.id, input: [] });
     const released = () =>
@@ -217,6 +219,11 @@ test("an orphan subagent is released even while an unrelated client is streaming
     const ids = await waitFor(() => (released().length >= 2 ? released() : null), { timeoutMs: 3000 });
     assert.ok(ids.includes(parent.id), `parent released: ${ids}`);
     assert.ok(!ids.includes(other.id), "the streaming client's own thread stays subscribed");
+    // Its capture would count any thread/started it receives as its own subagent.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const leaked = delivered.filter((message) => message.params?.thread?.parentThreadId === parent.id);
+    assert.deepEqual(leaked, [], "the orphan's notifications reach no client");
+    assert.ok(delivered.some((message) => message.params?.thread?.parentThreadId === other.id), "its own subagent still arrives");
   }));
 
 test("a thread shared by two clients stays subscribed until the second one leaves", (t) =>

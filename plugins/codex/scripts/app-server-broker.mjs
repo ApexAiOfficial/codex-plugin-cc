@@ -100,6 +100,9 @@ async function main() {
   const socketThreads = new Map();
   const threadOwners = new Map();
   const pendingUnsubscribes = new Map();
+  // Threads started with no owner left (a subagent whose parent's clients all disconnected). Their
+  // notifications go to no one: a client streaming its own turn would count them as its subagents.
+  const orphanThreads = new Set();
 
   function claimThread(socket, threadId) {
     if (!threadId || socket.destroyed) {
@@ -109,6 +112,7 @@ async function main() {
       socketThreads.set(socket, new Set());
     }
     socketThreads.get(socket).add(threadId);
+    orphanThreads.delete(threadId);
     if (!threadOwners.has(threadId)) {
       threadOwners.set(threadId, new Set());
     }
@@ -190,8 +194,13 @@ async function main() {
       if (!threadOwners.get(threadId)?.size) {
         // Nobody is left to own it: a subagent that started after its parent's last client
         // disconnected. Release it now, or it stays loaded for the broker's lifetime.
+        orphanThreads.add(threadId);
         unsubscribeWhenUnowned(threadId);
       }
+    }
+    const notificationThreadId = message.params?.threadId ?? message.params?.thread?.id ?? null;
+    if (notificationThreadId && orphanThreads.has(notificationThreadId)) {
+      return;
     }
     if (!target) {
       return;

@@ -19,7 +19,7 @@ import { readStdinIfPiped } from "./fs.mjs";
 import { ensureGitRepository } from "./git.mjs";
 import { withFileLock } from "./locking.mjs";
 import { fetchModelCatalog, loadModelCatalog, renderModelCatalog, validateModelChoice } from "./models.mjs";
-import { terminateRecordedProcessTree } from "./process.mjs";
+import { getProcessStartMarker, probeProcessIdentity, terminateRecordedProcessTree } from "./process.mjs";
 import {
   ACTIVE_JOB_STATUSES,
   generateJobId,
@@ -179,17 +179,52 @@ function readBrief(cwd, options, positionals) {
   return positionals.join(" ") || readStdinIfPiped();
 }
 
-function clearJobMark(workspaceRoot, jobId, field) {
-  updateJobFile(workspaceRoot, jobId, (job) => (job?.[field] ? { ...job, [field]: undefined } : null));
+/**
+ * A monitor notification is claimed by the delivering watcher (`notifyPending` records its
+ * identity) and confirmed once the line is written. A turn counts as notified once confirmed, or
+ * while the watcher that claimed it is still alive: if that watcher dies, or its rollback after a
+ * failed write fails too, the claim lapses and the turn can be surfaced again.
+ */
+export function isTurnNotified(job) {
+  if (!job?.notifiedAt) {
+    return false;
+  }
+  const pending = job.notifyPending;
+  if (!pending) {
+    return true;
+  }
+  const identity = probeProcessIdentity(pending.pid, pending.marker ?? null);
+  return identity !== "gone" && identity !== "different";
+}
+
+function claimTurnNotification(workspaceRoot, jobId) {
+  const claimed = updateJobFile(workspaceRoot, jobId, (job) =>
+    !job || job.collectedAt || isTurnNotified(job)
+      ? null
+      : { ...job, notifiedAt: nowIso(), notifyPending: { pid: process.pid, marker: getProcessStartMarker(process.pid) } }
+  );
+  return Boolean(claimed);
+}
+
+function settleTurnNotification(workspaceRoot, jobId, delivered) {
+  try {
+    updateJobFile(workspaceRoot, jobId, (job) => {
+      if (!job?.notifyPending || job.notifyPending.pid !== process.pid) {
+        return null;
+      }
+      return delivered ? { ...job, notifyPending: undefined } : { ...job, notifiedAt: undefined, notifyPending: undefined };
+    });
+  } catch {
+    // Best effort: an unsettled claim lapses when this watcher exits.
+  }
 }
 
 /** Set `field` once, under the state lock; true only for the caller that set it. */
-function markJob(workspaceRoot, jobId, field, { unless = [] } = {}) {
+function markJob(workspaceRoot, jobId, field) {
   if (!jobId) {
     return false;
   }
-  const blocked = (job) => !job || job[field] || unless.some((other) => job[other]);
-  return Boolean(updateJobFile(workspaceRoot, jobId, (job) => (blocked(job) ? null : { ...job, [field]: nowIso() })));
+  return Boolean(updateJobFile(workspaceRoot, jobId, (job) => (!job || job[field] ? null : { ...job, [field]: nowIso() })));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1186,12 +1221,12 @@ async function handleWatch(argv, ctx) {
     stdoutBroken = true;
   });
 
-  // Claim, write, and give the claim back if the write fails, so a lost line is picked up by a
-  // later watcher's startup scan or by the Stop reminder. Several watchers can be armed at once
-  // (the monitor has one entry per skill-name form), and a turn Claude already saw through
-  // wait/show needs no line.
+  // Claim, write, then confirm, or give the claim back if the write fails, so a lost line is picked
+  // up by a later watcher's startup scan or by the Stop reminder (see isTurnNotified). Several
+  // watchers can be armed at once (the monitor has one entry per skill-name form), and a turn
+  // Claude already saw through wait/show needs no line.
   const announce = (ticket) => {
-    if (!markJob(workspaceRoot, ticket.lastJobId, "notifiedAt", { unless: ["collectedAt"] })) {
+    if (!claimTurnNotification(workspaceRoot, ticket.lastJobId)) {
       return;
     }
     const summary = ticket.lastSummary ? ` — ${shorten(ticket.lastSummary, 160).replace(/[.\s]+$/, "")}` : "";
@@ -1200,12 +1235,8 @@ async function handleWatch(argv, ctx) {
     process.stdout.write(line, (error) => {
       if (error) {
         stdoutBroken = true;
-        try {
-          clearJobMark(workspaceRoot, jobId, "notifiedAt");
-        } catch {
-          // Best effort; the watcher is exiting anyway.
-        }
       }
+      settleTurnNotification(workspaceRoot, jobId, !error);
     });
   };
 
@@ -1301,7 +1332,7 @@ export function findUnsurfacedTicketTurns(workspaceRoot, sessionId) {
   return reconcileWorkspace(workspaceRoot)
     .filter((ticket) => ticket.state === "needs-review" && ticket.lastJobId)
     .map((ticket) => ({ ticket, job: readStoredJob(workspaceRoot, ticket.lastJobId) }))
-    .filter(({ job }) => job && job.sessionId === sessionId && !job.collectedAt && !job.notifiedAt && !job.nudgedAt);
+    .filter(({ job }) => job && job.sessionId === sessionId && !job.collectedAt && !isTurnNotified(job) && !job.nudgedAt);
 }
 
 export function markTicketTurnsNudged(workspaceRoot, entries) {
