@@ -12,6 +12,9 @@
 - A fresh-thread handoff when a Codex thread cannot be resumed; `CODEX_COMPANION_CODEX_BIN`.
 - `/codex:doctor`: read-only runtime health diagnostic.
 - Fix: stale-lock recovery could admit two lock holders at once.
+- `doctor`: the Codex version-skew check is now direction-aware. Only a companion that is older than the `CODEX_CLI_PATH` install warns; that is the only direction that breaks resume.
+- A ticket turn stopped by usage limits, authentication, or infrastructure errors now shows Codex's own error message on the card and in the job record, including the reset time for usage limits.
+- `tests/drills/broker-drill.mjs`: a manual real-process drill of broker lifecycle recovery (no model turns).
 
 ## 1.0.0
 

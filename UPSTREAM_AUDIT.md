@@ -42,9 +42,10 @@ This audit checks open issues and PRs on [openai/codex-plugin-cc](https://github
 
 | Defect | Fork change | Commit |
 | --- | --- | --- |
-| Codex CLI 0.144.1 cannot resume threads in a store shared with the desktop app's 0.155 (`paginated_threads is not supported yet`) | `CODEX_COMPANION_CODEX_BIN`; tickets continue on a fresh thread with a handoff of earlier turns. Exercised on real Codex. | `3476adc` |
+| Codex CLI 0.144.1 cannot resume threads in a store shared with the desktop app's 0.155 (`paginated_threads is not supported yet`) | `CODEX_COMPANION_CODEX_BIN`; tickets continue on a fresh thread with a handoff of earlier turns. Exercised on real Codex. The failure only occurs when the companion is the older binary: 0.155-alpha and 0.156.1 resume the failing thread. Resolved here by updating the CLI to 0.156.1, and `doctor` now warns only in that direction. | `3476adc`, this checkpoint |
 | In the Codex sandbox, `spawnSync` reports EPERM and Node children lose stdout | Preflight detects and reports it, so the lead's `verify` stays authoritative. | `edcb5b0`, `3864ca2` |
 | Test suite leaked detached brokers (about 100 MB per test); repeated runs froze the dev machine | Harness stops brokers on exit and on signals. | `084b6f8`, `a17c2d7` |
 | Same-process async lock holders broke each other's lock | Async holders tracked in-process. | `a17c2d7` |
 | Stale-lock recovery admitted several holders at once (reproduced by the `linux-platform` ticket: up to 14 of 32 processes) | Recovery serialized through a `.recover` gate with a re-check; an abandoned gate fails closed; deterministic regression test | `bbc7640` |
 | Claim checks flagged honest failed-then-rerun claims | A claim is consistent if any matching run agrees. | `f269ceb` |
+| A ticket turn stopped by usage limits recorded no `errorMessage`, and its card hid Codex's reset time (observed on a real quota hit) | Codex's error text is persisted on the job and shown on the card | this checkpoint |

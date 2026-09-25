@@ -22,7 +22,7 @@ It reports Codex version skew, state, lock and recovery-gate files, broker healt
 ## Validate a change [real]
 
 ```bash
-npm test                      # ~2.5 min; must be fully green
+npm test                      # ~2.5 min; must be fully green (drills in tests/drills/ are manual)
 npm run build                 # tsc over the runtime modules
 ps -eo pid,cmd | grep -E 'app-server-broker.mjs serve|codex-plugin-test|task-worker' | grep -v grep   # expect nothing
 ```
@@ -58,11 +58,30 @@ Recovery: `cx followup <ticket> "…"` continues the same ticket; the work alrea
 
 ## A thread cannot be resumed [real]
 
-Symptom: the card says `Thread reset: … could not be resumed (paginated_threads is not supported yet)`. Cause seen here: Codex CLI 0.144.1 sharing `~/.codex` with the desktop app's newer Codex. The turn continued on a fresh thread with a handoff of earlier turns (`threadHistory` on the ticket), so no action is required. To keep thread context, update the CLI, or point the runtime at the newer binary:
+Symptom: the card says `Thread reset: … could not be resumed (paginated_threads is not supported yet)`. Cause seen here: the companion's Codex CLI (0.144.1) was older than the desktop app's Codex (0.155-alpha), which shares `~/.codex`. An older binary cannot resume threads a newer one wrote. On the same threads, 0.155-alpha and 0.156.1 both resumed fine. The turn continued on a fresh thread with a handoff of earlier turns (`threadHistory` on the ticket), so no action is required. To keep thread context, make the companion's Codex at least as new as the other install (next section). `doctor` warns only in that direction.
+
+## Update or roll back the Codex CLI [real]
+
+The standalone install keeps every release under `~/.codex/packages/standalone/releases/`. `current` is a symlink to one of them.
 
 ```bash
-export CODEX_COMPANION_CODEX_BIN=/usr/lib/chatgpt/resources/codex
+codex --version                       # the companion resolves `codex` from PATH unless CODEX_COMPANION_CODEX_BIN is set
+codex update                          # standalone install: downloads the latest release and repoints `current`
+cx doctor | grep CODEX_CLI_PATH       # expect OK: companion same as or newer than the desktop build
+cx preflight                          # the sandbox profile should be unchanged
 ```
+
+Before switching, test a candidate without touching the default: `npm pack @openai/codex@<version>-linux-x64` into a scratch dir, then run `preflight` and a thread-resume probe with `CODEX_COMPANION_CODEX_BIN=<scratch>/package/vendor/x86_64-unknown-linux-musl/bin/codex`. Roll back by repointing the symlink:
+
+```bash
+ln -sfn ~/.codex/packages/standalone/releases/<old-release-dir> ~/.codex/packages/standalone/current
+```
+
+Done here on 2026-09-24: 0.144.1 → 0.156.1. The generated app-server types changed only additively for the methods the companion calls, and tsc and the full suite pass against them. Setting `CODEX_COMPANION_CODEX_BIN=/usr/lib/chatgpt/resources/codex` also works (it tracks the desktop build exactly). It was not chosen because it pins the companion to an alpha build that belongs to another app, and every hook and worker environment would need the variable.
+
+## Codex usage limits [real]
+
+Symptom: the card says `stopped by usage limits` and shows Codex's message, which includes the reset time ("try again at 11:10 PM"). Nothing ran, and the thread persists. Either wait and `cx followup <ticket>`, or do the work in Claude and `cx close <ticket> --abandoned --reason "…"`. Buying credits or upgrading the plan is the account owner's decision.
 
 ## A turn seems stuck [test]
 
@@ -72,9 +91,20 @@ export CODEX_COMPANION_CODEX_BIN=/usr/lib/chatgpt/resources/codex
 
 If `integrate` was killed mid-way, a `<worktree>.integration-journal/` directory remains. Do not delete it. Rerun `cx integrate <ticket>`: it restores the files the interrupted run wrote, then integrates again. If it refuses with "paths changed after the interrupted integration", you edited those files since. Resolve them by hand, then rerun. A conflict in normal integration writes nothing: resolve from the worktree, or `followup` with instructions.
 
-## Broker trouble [test]
+## Broker trouble [real]
 
-The shared broker only serves foreground stock commands (`review`, `task`, the stop gate); tickets never use it. A dead broker's metadata is replaced on next use. A broker whose app-server died exits by itself. A busy broker is never killed because it answered slowly; that call uses a private app-server instead. A Claude session ending does not stop a broker another session is using, and an idle broker exits after `CODEX_COMPANION_BROKER_IDLE_MS` (default 30 min).
+The shared broker only serves foreground stock commands (`review`, `task`, the stop gate); tickets never use it. Recovery is automatic in every case below. Each was exercised with a real `codex app-server` behind the real broker:
+
+- The broker's app-server dies: the broker exits by itself, and the next caller gets a fresh broker.
+- The broker dies (SIGKILL): its app-server exits too (stdin EOF), leaving no orphan. The stale metadata stays on disk until the next caller replaces it.
+- A session ends while the broker is serving a request: the broker declines the shutdown (busy), the request finishes, and a later idle SessionEnd stops it and clears its metadata.
+- An idle broker exits after `CODEX_COMPANION_BROKER_IDLE_MS` (default 30 min); the next caller transparently starts a new one.
+
+A busy broker is never killed because it answered slowly ([test]); that call uses a private app-server instead. To re-run the drill (about 30 s, no model turns, disposable repo and state):
+
+```bash
+node tests/drills/broker-drill.mjs      # expect ALL DRILLS PASSED
+```
 
 ## State corruption [test]
 

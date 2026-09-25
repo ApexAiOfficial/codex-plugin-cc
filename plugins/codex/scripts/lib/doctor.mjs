@@ -95,6 +95,36 @@ function configuredCodexPath(env) {
   return { configPath, binary: match ? (match[1] ?? match[2] ?? match[3]).trim() : null };
 }
 
+/** `codex-cli 0.155.0-alpha.16.4` → { core: [0, 155, 0], pre: ["alpha", "16", "4"] }, or null. */
+function parseCodexVersion(detail) {
+  const match = firstLine(detail).match(/(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+  return match ? { core: match.slice(1, 4).map(Number), pre: match[4] ? match[4].split(".") : [] } : null;
+}
+
+/** Semver precedence: negative when `a` is older than `b`, 0 when equal. */
+function compareCodexVersions(a, b) {
+  for (let index = 0; index < 3; index += 1) {
+    if (a.core[index] !== b.core[index]) {
+      return a.core[index] - b.core[index];
+    }
+  }
+  if (!a.pre.length || !b.pre.length) {
+    return (b.pre.length ? 1 : 0) - (a.pre.length ? 1 : 0);
+  }
+  for (let index = 0; index < Math.max(a.pre.length, b.pre.length); index += 1) {
+    const [left, right] = [a.pre[index], b.pre[index]];
+    if (left === undefined || right === undefined) {
+      return left === undefined ? -1 : 1;
+    }
+    const numeric = /^\d+$/.test(left) && /^\d+$/.test(right);
+    const order = numeric ? Number(left) - Number(right) : left.localeCompare(right);
+    if (order !== 0) {
+      return order;
+    }
+  }
+  return 0;
+}
+
 function parseWorktreeList(output) {
   return String(output ?? "")
     .split(/\r?\n/)
@@ -260,26 +290,47 @@ export async function collectDoctorReport(cwd, options = {}) {
         { binary: alternate.binary, configPath: alternate.configPath }
       );
     } else if (codex.available && firstLine(configured.detail) !== firstLine(codex.detail)) {
-      report.add(
-        "WARN",
-        "codex-version-skew",
-        `Codex version skew: companion uses ${firstLine(codex.detail)}, while CODEX_CLI_PATH uses ${firstLine(configured.detail)}; some threads cannot be resumed and tickets fall back to fresh threads.`,
-        "Update the older Codex install or set CODEX_COMPANION_CODEX_BIN to the intended binary.",
-        {
-          companionBinary: codexBinary,
-          companionVersion: firstLine(codex.detail),
-          configuredBinary: alternate.binary,
-          configuredVersion: firstLine(configured.detail),
-          configPath: alternate.configPath
-        }
-      );
+      // Only an older companion breaks ticket continuity: it cannot resume threads the newer
+      // install wrote (measured: 0.144.1 fails on 0.155 threads with "paginated_threads is not
+      // supported yet"), while a newer companion resumes threads written by either.
+      const companionVersion = parseCodexVersion(codex.detail);
+      const configuredVersion = parseCodexVersion(configured.detail);
+      const order = companionVersion && configuredVersion ? compareCodexVersions(companionVersion, configuredVersion) : null;
+      const direction = order === null ? "unknown" : order < 0 ? "older" : order > 0 ? "newer" : "same";
+      const data = {
+        direction,
+        companionBinary: codexBinary,
+        companionVersion: firstLine(codex.detail),
+        configuredBinary: alternate.binary,
+        configuredVersion: firstLine(configured.detail),
+        configPath: alternate.configPath
+      };
+      if (direction === "newer" || direction === "same") {
+        report.add(
+          "OK",
+          "codex-version-skew",
+          `The companion's Codex (${firstLine(codex.detail)}) is ${direction === "same" ? "the same release as" : "newer than"} CODEX_CLI_PATH (${firstLine(configured.detail)}), so tickets can resume threads written by either; the older install may not open threads the companion created until it updates.`,
+          "No action needed.",
+          data
+        );
+      } else {
+        report.add(
+          "WARN",
+          "codex-version-skew",
+          `Codex version skew: companion uses ${firstLine(codex.detail)}, while CODEX_CLI_PATH uses ${firstLine(configured.detail)}; some threads cannot be resumed and tickets fall back to fresh threads.`,
+          direction === "older"
+            ? "Update the companion's Codex (`codex update` for the standalone install), or set CODEX_COMPANION_CODEX_BIN to the newer binary."
+            : "Update the older Codex install or set CODEX_COMPANION_CODEX_BIN to the intended binary.",
+          data
+        );
+      }
     } else {
       report.add(
         "OK",
         "codex-version-skew",
         `CODEX_CLI_PATH and the companion report the same Codex version (${firstLine(configured.detail)}).`,
         "No action needed.",
-        { binary: alternate.binary, version: firstLine(configured.detail), configPath: alternate.configPath }
+        { direction: "same", binary: alternate.binary, version: firstLine(configured.detail), configPath: alternate.configPath }
       );
     }
   } else {
