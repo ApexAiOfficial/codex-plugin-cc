@@ -192,3 +192,67 @@ test("an empty limit map is unavailable even when it carries a read time", () =>
   const legacy = { accountId: "acct", readAt: "2026-09-01T00:00:00.000Z", observedAt: "2026-09-01T00:00:00.000Z", limits: {} };
   assert.equal(accountFreshness(legacy, Date.parse("2026-09-26T00:00:00.000Z")).status, "unavailable");
 });
+
+// ---- Turn 3 residuals (re-review of 8a11734) ----
+
+// Millisecond timestamps tied, so a delayed older observation from the same millisecond won.
+test("observations within the same millisecond still keep their real order", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-26T12:00:00.000Z") });
+  const file = path.join(makeTempDir(), "capacity.json");
+  const older = createCapacityObserver({ file });
+  const newer = createCapacityObserver({ file });
+  older.onResponse("account/rateLimits/read", readResult("acct-old", 10));
+  newer.onResponse("account/rateLimits/read", readResult("acct-new", 70));
+  t.mock.timers.reset();
+  await newer.drain();
+  await older.drain();
+  assert.equal(readCapacity(file).account.accountId, "acct-new", "the later observation wins despite an identical Date");
+});
+
+// A record written while the clock ran ahead blocked every real update and looked fresh.
+test("a record observed in the future neither blocks newer data nor reads as fresh", async () => {
+  const { CLOCK_SKEW_TOLERANCE_MS, mayReplace } = await import("../plugins/codex/scripts/lib/capacity.mjs");
+  const future = Date.now() + 60 * 60 * 1000;
+  assert.equal(mayReplace(Date.now(), future, null), true, "a future stored key is untrusted");
+  assert.equal(mayReplace(Date.now() - 1000, Date.now(), null), false, "a genuinely older key is refused");
+  assert.equal(mayReplace(Date.now(), null, new Date(Date.now() - 1000).toISOString()), true, "legacy records compare by observedAt");
+
+  const file = path.join(makeTempDir(), "capacity.json");
+  const futureIso = new Date(future).toISOString();
+  fs.writeFileSync(file, JSON.stringify({ version: 1, account: { accountId: "acct", readAt: futureIso, observedAt: futureIso, observedKey: future, limits: { codex: { limitId: "codex", primary: window(10), secondary: null, observedAt: futureIso, observedKey: future } } }, threads: {} }));
+  assert.equal(accountFreshness(readCapacity(file).account).status, "stale");
+  const observer = createCapacityObserver({ file });
+  observer.onResponse("account/rateLimits/read", readResult("acct", 90));
+  await observer.drain();
+  assert.equal(readCapacity(file).account.limits.codex.primary.usedPercent, 90, "the real read replaced the future record");
+  assert.ok(CLOCK_SKEW_TOLERANCE_MS > 0);
+});
+
+// drain's losing race timer stayed referenced and held a finished worker open for the full budget.
+test("a fast drain does not hold the process open", async () => {
+  const dir = makeTempDir();
+  const script = path.join(dir, "drain.mjs");
+  const capacity = path.resolve("plugins/codex/scripts/lib/capacity.mjs");
+  fs.writeFileSync(script, `const { createCapacityObserver } = await import(${JSON.stringify(capacity)});
+const observer = createCapacityObserver({ file: ${JSON.stringify(path.join(dir, "capacity.json"))} });
+observer.onNotification("thread/tokenUsage/updated", ${JSON.stringify(tokenParams("thread-exit", 10))});
+await observer.drain(1500);
+`);
+  const started = Date.now();
+  const child = spawn(process.execPath, [script], { stdio: "ignore" });
+  const code = await new Promise((resolve) => child.on("exit", resolve));
+  assert.equal(code, 0);
+  assert.ok(Date.now() - started < 1200, `the process exited ${Date.now() - started} ms after start`);
+});
+
+// Pins were exempt from the record cap, so enough open tickets could exceed it.
+test("pinned records are bounded by the record cap too", () => {
+  const now = Date.now();
+  const threads = {};
+  for (let index = 0; index < MAX_THREAD_RECORDS + 1; index += 1) {
+    threads[`pin-${index}`] = { threadId: `pin-${index}`, pinned: { ticketId: `t${index}`, at: new Date(now - index).toISOString() } };
+  }
+  const kept = pruneThreads(threads, now);
+  assert.equal(Object.keys(kept).length, MAX_THREAD_RECORDS);
+  assert.ok(kept["pin-0"] && !kept[`pin-${MAX_THREAD_RECORDS}`], "the newest pins are kept");
+});
