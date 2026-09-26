@@ -69,10 +69,10 @@ Per-repository state lives under `$CLAUDE_PLUGIN_DATA/state/<repo-slug>-<hash>/`
 
 ## Incomplete / next
 
-The ordered remaining-work plan is in `CHECKPOINT_HANDOFF.md` ("Roadmap"). Open items include:
-- a real multi-turn ticket on Codex 0.156.1 (blocked by the account usage limit on 2026-09-24)
-- retention of closed tickets
-- delegation metrics
+The ordered plan is in `CHECKPOINT_HANDOFF.md` ("Next-work order"). In order:
+- **Next planned feature: Codex capacity telemetry** (not started; deferred on 2026-09-25). It will expose Codex-native account rate limits (`account/rateLimits/read`, `account/rateLimits/updated`) and per-thread active-context usage (`thread/tokenUsage/updated`) in a stable, machine-readable form, for a future standalone Claude limit/context guard. The hard rule: context pressure is never computed from cumulative thread totals. The full work order and recon notes are in `docs/work-orders/codex-capacity-telemetry.md`.
+- delegation metrics, only after real usage
+- optional: foreground `/codex:rescue` through durable jobs (#738)
 
 ## Key design decisions
 

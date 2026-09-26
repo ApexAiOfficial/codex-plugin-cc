@@ -2,12 +2,12 @@
 
 Operational recovery notes. This file is overwritten at each safe checkpoint; git history keeps the earlier versions. `PROJECT_STATUS.md` describes the system, `UPSTREAM_AUDIT.md` holds defect evidence, `IDEA_BANK_REVIEW.md` classifies the idea bank, and `RUNBOOK.md` holds validated procedures.
 
-## Current checkpoint — 2026-09-25 (review-today resolved)
+## Current checkpoint — 2026-09-25 late (capacity telemetry recorded, not started)
 
-- **Branch** `orchestration`, pushed. The checkpoint SHA is the commit containing this file (`git log -1`; verify with `git rev-parse HEAD origin/orchestration`). The code checkpoint beneath it is `2eac4ec`. `main` is untouched and equals upstream `db52e28`. No other branches exist: `wip/review-today-fixes` was merged and deleted locally and on `origin`.
+- **Branch** `orchestration`, pushed. The checkpoint SHA is the commit containing this file (`git log -1`; verify with `git rev-parse HEAD origin/orchestration`). This checkpoint changes docs only. The last code checkpoint is `2eac4ec`, and the previous docs checkpoint is `1a3cddd`. `main` is untouched and equals upstream `db52e28`. No other branches exist: `wip/review-today-fixes` was merged and deleted locally and on `origin`.
 - **Working tree:** clean after this commit.
 - **Validation at `2eac4ec`:** `npm test` 197/197, tsc clean. The run left no temp or state dirs, and there are no stray broker, worker, or watch processes. `doctor` reports no failures.
-- **Codex CLI:** standalone `codex` 0.156.1. The desktop app's `CODEX_CLI_PATH` is 0.155.0-alpha.16.4, and `doctor` reports OK. Roll back with `ln -sfn ~/.codex/packages/standalone/releases/0.144.1-x86_64-unknown-linux-musl ~/.codex/packages/standalone/current`.
+- **Codex CLI:** standalone `codex` 0.156.1. The desktop app's `CODEX_CLI_PATH` has since moved to **0.158.0-alpha.2**, so `doctor` now WARNs for version skew with the companion older, as designed. The latest stable is 0.157.1, still older than the desktop build. A resume probe on the current ticket threads succeeded with 0.156.1, 0.157.1, and 0.158-alpha, so there is no breakage yet. The CLI was left unchanged. Roll back with `ln -sfn ~/.codex/packages/standalone/releases/0.144.1-x86_64-unknown-linux-musl ~/.codex/packages/standalone/current`.
 - **Codex tickets:** none open. No ticket worktrees and no `refs/codex-companion/*` refs remain.
 - **Integration journals / `.recover` gates:** none. **Active processes:** none of ours.
 
@@ -21,14 +21,24 @@ The `review-today` Codex review is fully resolved, over 4 turns on one thread (`
 
 ## Next-work order
 
-1. **Delegation metrics** (ideas 79–81), only once there is real usage to measure.
-2. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
-
-Nothing else is pending. Everything that shipped is covered by tests, drills, or the live check (`RUNBOOK.md`).
+1. **Codex capacity telemetry: the next planned feature, not started.** Deferred at the human's request (Claude usage limit) before any implementation. The full work order, requirements, tests, acceptance criteria, exclusions, and read-only recon notes are in **`docs/work-orders/codex-capacity-telemetry.md`**.
+   - Goal: expose Codex-native account rate limits (`account/rateLimits/read`, `account/rateLimits/updated`) and per-thread active-context usage (`thread/tokenUsage/updated`) in a stable, machine-readable form, so a separate standalone Claude limit/context guard can consume them.
+   - **Rule: never compute context pressure from cumulative thread totals.** Use the proven active/latest semantics and the model context window. Keep the raw native fields, and never fabricate mappings or percentages.
+   - Out of scope: a Claude-side guard, a resource manager, cross-provider scheduling, quota-based delegation, account switching, and automatic checkpoint/commit behavior.
+2. Delegation metrics (ideas 79–81), only once there is real usage to measure.
+3. Optional: route a foreground `/codex:rescue` through durable jobs (#738).
 
 ## Exact first action for the next Claude session
 
-Read this file. Run `node plugins/codex/scripts/codex-companion.mjs doctor` with the dogfood env below and confirm there are no FAILs. Check `git status` and `git rev-parse HEAD origin/orchestration`. Then pick up the next-work order above, or whatever the human asks for.
+1. Verify the state:
+   - `git status`, `git branch --show-current` (expect `orchestration`, not `main`), and `git rev-parse HEAD origin/orchestration`.
+   - Run `node plugins/codex/scripts/codex-companion.mjs doctor` with the dogfood env below. The version-skew WARN is expected; no FAIL is.
+   - No tickets, worktrees, refs, or companion processes.
+2. Decide the Codex binary: take the newest stable if it is ≥ the desktop build, or set `CODEX_COMPANION_CODEX_BIN`, following RUNBOOK "Update or roll back the Codex CLI". Generate the protocol types from that binary.
+3. Start the capacity-telemetry work order (`docs/work-orders/codex-capacity-telemetry.md`):
+   - focused protocol and repo recon first: verify observations A–G and the active-context semantics in the Codex source
+   - then the targeted implementation, tests, real no-model validation, and a Codex adversarial review
+   - then a checkpoint
 
 ```bash
 export CLAUDE_PLUGIN_DATA="$HOME/.cache/codex-companion-fork"
