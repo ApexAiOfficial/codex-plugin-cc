@@ -1,6 +1,6 @@
-# Work order: Codex capacity telemetry (deferred, next planned feature)
+# Work order: Codex capacity telemetry (implemented)
 
-Status: **not started.** It was deferred on 2026-09-25 at the human's request, at a Claude usage limit, before any implementation. No code exists for it. This file preserves the work order so the next session does not have to rediscover it. It condenses the human's original work order; every requirement is kept.
+Status: **implemented and accepted on 2026-09-26**: feature `4cc5432`; review resolutions `885f805`, `8a11734`, `a8e8ebc`, `a15d8c3`, `f845f52`, `a95a323`; see `CHECKPOINT_HANDOFF.md`. This file remains the specification. It condenses the human's original work order; every requirement is kept. The recon notes at the end are historical: the semantics were then verified in the Codex source, and the result is in the header of `plugins/codex/scripts/lib/capacity.mjs`.
 
 ## Goal
 

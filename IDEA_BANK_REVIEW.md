@@ -85,7 +85,7 @@ Classification of the 100-item orchestration idea bank against what the fork act
 | 89 | Runtime health diagnostics | Adopted | `doctor` / `/codex:doctor` (read-only, pressure-tested) |
 | 90 | Benchmark suite | Deferred | After metrics exist |
 | 91 | Resource-pressure awareness | Deferred | Linux PSI judged an optimization, not a correctness need |
-| 92 | Rate-limit / quota awareness | Adopted | `quota` outcome; the thread persists for a later followup |
+| 92 | Rate-limit / quota awareness | Adopted | `quota` outcome with Codex's reset message; the thread persists for a later followup. Codex capacity telemetry exposes the account limits and per-thread context (`capacity.json`, `status --json`) but takes no automatic action |
 | 93 | Fair worker scheduling | Unnecessary | At most 3 concurrent tickets |
 | 94 | Speculative work with cancellation | Adopted | `cancel` plus guidance |
 | 95 | Stale-result detection | Adapted | HEAD-moved warning; merge against the current checkout |

@@ -79,7 +79,7 @@ Before switching, test a candidate without touching the default: `npm pack @open
 ln -sfn ~/.codex/packages/standalone/releases/<old-release-dir> ~/.codex/packages/standalone/current
 ```
 
-Done here on 2026-09-24: 0.144.1 → 0.156.1. The generated app-server types changed only additively for the methods the companion calls, and tsc and the full suite pass against them. Setting `CODEX_COMPANION_CODEX_BIN=/usr/lib/chatgpt/resources/codex` also works (it tracks the desktop build exactly). It was not chosen because it pins the companion to an alpha build that belongs to another app, and every hook and worker environment would need the variable.
+Done here on 2026-09-24: 0.144.1 → 0.156.1, and on 2026-09-26: 0.156.1 → 0.157.1. The desktop app runs a newer alpha, so `doctor`'s skew WARN is expected until stable catches up; a resume probe on the ticket threads succeeded with all three versions. The generated app-server types changed only additively for the methods the companion calls, and tsc and the full suite pass against them. Setting `CODEX_COMPANION_CODEX_BIN=/usr/lib/chatgpt/resources/codex` also works (it tracks the desktop build exactly). It was not chosen because it pins the companion to an alpha build that belongs to another app, and every hook and worker environment would need the variable.
 
 ## Codex usage limits [real]
 
@@ -107,6 +107,29 @@ A busy broker is never killed because it answered slowly ([test]); that call use
 ```bash
 node tests/drills/broker-drill.mjs      # expect ALL DRILLS PASSED
 ```
+
+## Codex capacity telemetry [real]
+
+Codex's own account rate limits and each thread's active context, persisted to one file and shown in status:
+
+```bash
+cx status                         # "Codex capacity:" section: native buckets, windows, and running/open tickets' context
+cx status --json | jq .capacity   # the machine interface (schemaVersion 1): account.limits[], threads[], freshness
+cx status --refresh-capacity      # one no-model account/rateLimits/read now (no quota)
+ls "$CLAUDE_PLUGIN_DATA/state/capacity.json"   # or $CODEX_COMPANION_CAPACITY_FILE
+```
+
+- Account data is refreshed at every task, review, and ticket turn start, and by `--refresh-capacity`. Rolling updates from Codex are merged in, including those the shared broker receives with no client attached.
+- **Freshness:**
+  - `stale` means a bucket is older than 10 minutes, or one of its windows reset after it was observed. Refresh to fix it.
+  - `unavailable` means the Codex install does not support the read, auth exposes no limits, or the read returned nothing. The reason is shown.
+  - A thread is `stale` while its running turn has not reported yet, and `unknown` when nothing was observed. Unknown values are null, never 0%.
+- **Context occupancy** = `last.totalTokens / modelContextWindow`: the latest request, as Codex itself reports it. The raw cumulative `total` is kept in the JSON, but it is not context. `codexContextLeftPercent` reproduces the Codex TUI's own "context left", which excludes a 12,000-token baseline.
+- **Retention:**
+  - An open ticket's root thread is pinned until the ticket closes.
+  - Otherwise the newest 256 records are kept, subagents are evicted before roots, and nothing older than 7 days is kept.
+  - An older observation from another connection never overwrites a newer one (sub-millisecond ordering keys). A record stamped in the future after a clock change reads as stale and is replaceable.
+- **A corrupt or suspect file** is safe to delete; it is telemetry only and is rebuilt on the next observation. A corrupt file reads as empty or unavailable and never breaks commands.
 
 ## Processes started by Codex commands [real]
 
