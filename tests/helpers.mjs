@@ -33,6 +33,10 @@ export function makeTempDir(prefix = "codex-plugin-test-") {
   return dir;
 }
 
+// Capacity telemetry is shared across workspaces (one file under the state root); give each test
+// process its own file so parallel test files never read each other's telemetry. Children inherit it.
+process.env.CODEX_COMPANION_CAPACITY_FILE = path.join(makeTempDir("codex-capacity-"), "capacity.json");
+
 // Foreground commands lazily start a detached shared broker (plus its app-server) for their
 // workspace, exactly as in a real session where SessionEnd shuts it down. Tests never end a
 // session, so without this every such test leaked two long-lived processes; repeated runs could

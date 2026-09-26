@@ -325,6 +325,53 @@ export function renderTaskResult(parsedResult, meta) {
   return `${message}\n`;
 }
 
+function formatResetTime(resetsAt) {
+  if (!resetsAt) {
+    return null;
+  }
+  const date = new Date(resetsAt * 1000);
+  const sameDay = new Date().toDateString() === date.toDateString();
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Concise capacity lines: native limit ids and real durations; raw detail stays in --json. */
+function appendCapacityLines(lines, capacity) {
+  if (!capacity) {
+    return;
+  }
+  const { account } = capacity;
+  if (account.freshness.status === "unavailable") {
+    lines.push(`Codex capacity: account limits unavailable (${account.freshness.reason}).`);
+  } else {
+    const stale = account.freshness.status === "stale" ? ` — STALE (${account.freshness.reason})` : "";
+    lines.push(`Codex capacity${stale}:`);
+    for (const limit of account.limits) {
+      const name = limit.limitName && limit.limitName !== limit.limitId ? ` (${limit.limitName})` : "";
+      const reached = limit.rateLimitReachedType ? ` · reached: ${limit.rateLimitReachedType}` : "";
+      if (!limit.windows.length) {
+        lines.push(`- ${limit.key}${name}: no window data${reached}`);
+      }
+      for (const window of limit.windows) {
+        const resets = formatResetTime(window.resetsAt);
+        lines.push(`- ${limit.key}${name} ${window.label}: ${window.usedPercent}% used${resets ? ` · resets ${resets}` : ""}${reached}`);
+      }
+    }
+  }
+  for (const thread of capacity.threads) {
+    const who = thread.ticketId ? `ticket ${thread.ticketId}` : thread.jobId ?? thread.threadId;
+    const context = thread.context;
+    const stale = thread.freshness.status === "stale" ? " · stale" : "";
+    if (context.usedPercent === null) {
+      lines.push(`- ${who}: context unknown${context.usedTokens !== null ? ` (${context.usedTokens} tokens, window unknown)` : ""}`);
+    } else {
+      lines.push(`- ${who}: context ${context.usedPercent}% used (${context.usedTokens}/${context.windowTokens} tokens)${context.exceeded ? " · window exceeded" : ""}${stale}`);
+    }
+  }
+  lines.push("");
+}
+
 export function renderStatusReport(report) {
   const lines = [
     "# Codex Status",
@@ -380,6 +427,8 @@ export function renderStatusReport(report) {
   } else if (report.running.length === 0 && !report.latestFinished) {
     lines.push("No jobs recorded yet.", "");
   }
+
+  appendCapacityLines(lines, report.capacity);
 
   if (report.needsReview) {
     lines.push("The stop-time review gate is enabled.");

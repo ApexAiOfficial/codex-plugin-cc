@@ -168,7 +168,7 @@ test("a shared ticket records evidence, attributes changes, and passes independe
   assert.deepEqual(payload.evidence.codexReported, ["src/feature.js"]);
   assert.deepEqual(payload.evidence.ownership.violations, []);
   assert.equal(payload.claims[0].observation, "consistent");
-  assert.equal(payload.tokenUsage.totalTokens, 1234);
+  assert.equal(payload.tokenUsage.totalTokens, 2000000, "the ticket payload keeps the cumulative total (not a context measure)");
   assert.equal(fs.readFileSync(path.join(ctx.repo, "src", "feature.js"), "utf8"), "export const feature = true;");
 
   const turnStart = ctx.fakeState().lastTurnStart;
@@ -362,6 +362,57 @@ test("an explicit model or effort Codex does not offer is rejected before any tu
   companionJson(["wait", "m3", "--timeout-ms", "20000"], { cwd: ctx.repo, env: ctx.env });
   const preflight = companion(["preflight"], { cwd: ctx.repo, env: ctx.env });
   assert.match(preflight.stdout, /Models: tickets use fake-frontier \(account default\)/);
+});
+
+function capacityEnv(ctx) {
+  return { ...ctx.env, CODEX_COMPANION_CAPACITY_FILE: path.join(makeTempDir(), "capacity.json") };
+}
+
+test("status --json reports account limits and a ticket's active context, never its cumulative total", () => {
+  const ctx = setupRepo();
+  const env = capacityEnv(ctx);
+  const { launched } = delegateAndWait({ ...ctx, env }, ["--ticket", "ctx", "Work.\nFAKE_WRITE src/c.js 1"]);
+  const status = companionJson(["status"], { cwd: ctx.repo, env });
+  const { capacity } = status;
+  assert.equal(capacity.schemaVersion, 1);
+  assert.equal(capacity.file, env.CODEX_COMPANION_CAPACITY_FILE);
+  assert.equal(capacity.account.freshness.status, "fresh");
+  assert.deepEqual(capacity.account.limits.map((limit) => limit.key).sort(), ["codex", "codex_other"]);
+  const other = capacity.account.limits.find((limit) => limit.key === "codex_other");
+  assert.deepEqual(other.windows.map((window) => [window.label, window.windowDurationMins]), [["30m", 30]], "an unrecognized duration stays as it is");
+  assert.equal(other.normalModelSlug, "fake-frontier", "a model association only because Codex supplied it");
+  const thread = capacity.threads.find((entry) => entry.ticketId === "ctx");
+  assert.ok(thread, JSON.stringify(capacity.threads));
+  assert.equal(thread.jobId, readTicketRecord(ctx.repo, "ctx").lastJobId);
+  assert.equal(thread.freshness.status, "fresh");
+  assert.equal(thread.tokenUsage.total.totalTokens, 2000000, "the raw cumulative total is preserved");
+  assert.equal(thread.context.usedTokens, 64600);
+  assert.equal(thread.context.usedPercent, 25, "64600 / 258400 of the window, not 2000000 / 258400");
+  assert.equal(thread.context.windowTokens, 258400);
+  assert.ok(launched.ticketId);
+
+  const human = companion(["status"], { cwd: ctx.repo, env }).stdout;
+  assert.match(human, /Codex capacity:\n- codex 5h: 12% used · resets [^\n]+\n- codex 7d: 40% used/);
+  assert.match(human, /- codex_other \(Other\) 30m: 5% used/);
+  assert.match(human, /- ticket ctx: context 25% used \(64600\/258400 tokens\)/);
+});
+
+test("a corrupt capacity file or an older Codex leaves status working and reports telemetry as unavailable", () => {
+  const ctx = setupRepo("rate-limits-unsupported");
+  const env = capacityEnv(ctx);
+  fs.mkdirSync(path.dirname(env.CODEX_COMPANION_CAPACITY_FILE), { recursive: true });
+  fs.writeFileSync(env.CODEX_COMPANION_CAPACITY_FILE, "{not json");
+  const corrupt = companionJson(["status"], { cwd: ctx.repo, env });
+  assert.equal(corrupt.capacity.account.freshness.status, "unavailable");
+  assert.deepEqual(corrupt.capacity.account.limits, []);
+
+  const { waited } = delegateAndWait({ ...ctx, env }, ["--ticket", "old", "Work.\nFAKE_WRITE src/o.js 1"]);
+  assert.equal(waited.ticket.lastOutcome, "completed", "telemetry failure never fails the ticket turn");
+  const after = companionJson(["status"], { cwd: ctx.repo, env });
+  assert.equal(after.capacity.account.freshness.status, "unavailable");
+  assert.match(after.capacity.account.freshness.reason, /Unsupported method/);
+  assert.ok(!after.capacity.account.limits.some((limit) => limit.windows.some((window) => window.usedPercent === 0)), "no fabricated 0%");
+  assert.match(companion(["status"], { cwd: ctx.repo, env }).stdout, /Codex capacity: account limits unavailable \(Unsupported method/);
 });
 
 test("infrastructure failures are classified separately from bad work", () => {

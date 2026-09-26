@@ -614,7 +614,12 @@ rl.on("line", (line) => {
             for (const entry of work.items) {
               send({ method: "item/completed", params: { threadId: thread.id, turnId, item: entry.completed } });
             }
-            send({ method: "thread/tokenUsage/updated", params: { threadId: thread.id, turnId, tokenUsage: { total: { totalTokens: 1234 }, last: { totalTokens: 1234 }, modelContextWindow: null } } });
+            // Cumulative total far beyond the window; the active context (last) is 25% of it.
+            send({ method: "thread/tokenUsage/updated", params: { threadId: thread.id, turnId, tokenUsage: {
+              total: { totalTokens: 2000000, inputTokens: 1900000, cachedInputTokens: 1500000, cacheWriteInputTokens: 0, outputTokens: 100000, reasoningOutputTokens: 40000 },
+              last: { totalTokens: 64600, inputTokens: 62000, cachedInputTokens: 50000, cacheWriteInputTokens: 0, outputTokens: 2600, reasoningOutputTokens: 900 },
+              modelContextWindow: 258400
+            } } });
             if (work.directives.turnFail) {
               send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "failed", { message: "usage limit reached", codexErrorInfo: "usageLimitExceeded", additionalDetails: null }) } });
               return;
@@ -811,6 +816,18 @@ rl.on("line", (line) => {
 	        break;
 	      }
 
+	      case "account/rateLimits/read":
+	        if (BEHAVIOR === "rate-limits-unsupported") {
+	          send({ id: message.id, error: { code: -32601, message: "Unsupported method: account/rateLimits/read" } });
+	          break;
+	        }
+	        send({ id: message.id, result: { accountId: "acct-fake", ordinaryUsageAllowed: true, rateLimitResetCredits: null, rateLimitUpsell: null,
+	          rateLimits: { limitId: "codex", limitName: null, normalModelSlug: null, primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 4102444800 }, secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 4102444800 }, credits: null, individualLimit: null, spendControlReached: null, planType: "plus", rateLimitReachedType: null },
+	          rateLimitsByLimitId: {
+	            codex: { limitId: "codex", limitName: null, normalModelSlug: null, primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 4102444800 }, secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 4102444800 }, credits: null, individualLimit: null, spendControlReached: null, planType: "plus", rateLimitReachedType: null },
+	            codex_other: { limitId: "codex_other", limitName: "Other", normalModelSlug: "fake-frontier", primary: { usedPercent: 5, windowDurationMins: 30, resetsAt: 4102444800 }, secondary: null, credits: null, individualLimit: null, spendControlReached: null, planType: "plus", rateLimitReachedType: null }
+	          } } });
+	        break;
 	      case "model/list":
 	        send({ id: message.id, result: { nextCursor: null, data: [
 	          { id: "fake-frontier", model: "fake-frontier", description: "Fake default model.", isDefault: true, hidden: false, defaultReasoningEffort: "medium",
