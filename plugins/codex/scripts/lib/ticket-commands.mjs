@@ -19,6 +19,7 @@ import { readStdinIfPiped } from "./fs.mjs";
 import { ensureGitRepository } from "./git.mjs";
 import { withFileLock } from "./locking.mjs";
 import { fetchModelCatalog, loadModelCatalog, renderModelCatalog, validateModelChoice } from "./models.mjs";
+import { pinCapacityThread, unpinCapacityThreads } from "./capacity.mjs";
 import { getProcessStartMarker, probeProcessIdentity, terminateRecordedProcessTree } from "./process.mjs";
 import {
   ACTIVE_JOB_STATUSES,
@@ -518,6 +519,8 @@ export async function runTicketTurn(request, ctx, { progress, jobId }) {
       updateJobFile(workspaceRoot, jobId, (job) => (job ? { ...job, prompt: handoffPrompt, threadReset } : null));
       result = await runAppServerTurn(workdir, { ...turnOptions, prompt: handoffPrompt, resumeThreadId: null });
     }
+    // Keep this open ticket's context record from being pruned until the ticket closes.
+    pinCapacityThread(result.threadId, { ticketId: ticket.id, jobId });
 
     const endTree = snapshot();
     const evidence =
@@ -1163,6 +1166,7 @@ function closeTicket(workspaceRoot, ticket, options) {
   if (removeWorktree) {
     removeTicketWorktree({ repoRoot: workspaceRoot, worktree: ticket.worktree, ticketId: ticket.id, worktreesRoot });
   }
+  unpinCapacityThreads([ticket.threadId, ...(ticket.threadHistory ?? []).map((entry) => entry.previousThreadId)]);
   const closed = updateTicket(workspaceRoot, ticket.id, (record) => {
     record.state = decision;
     record.closedAt = nowIso();

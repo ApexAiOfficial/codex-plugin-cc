@@ -406,6 +406,11 @@ test("a worktree ticket's context appears in the main workspace's status", () =>
   const thread = companionJson(["status"], { cwd: ctx.repo, env }).capacity.threads.find((entry) => entry.ticketId === "iso");
   assert.ok(thread, "the worktree ticket's thread is listed");
   assert.equal(thread.context.usedTokens, 64600);
+  // The open ticket's root is pinned against pruning, and closing the ticket releases it.
+  const recordOf = () => JSON.parse(fs.readFileSync(env.CODEX_COMPANION_CAPACITY_FILE, "utf8")).threads[thread.threadId];
+  assert.equal(recordOf().pinned.ticketId, "iso");
+  companionJson(["close", "iso", "--abandoned", "--reason", "test"], { cwd: ctx.repo, env });
+  assert.equal(recordOf().pinned, undefined);
 });
 
 test("a corrupt capacity file or an older Codex leaves status working and reports telemetry as unavailable", () => {

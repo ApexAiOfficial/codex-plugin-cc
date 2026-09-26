@@ -41,6 +41,9 @@ const FLUSH_LOCK_TIMEOUT_MS = 2000;
 const FLUSH_RETRY_MS = 250;
 const FLUSH_MAX_ATTEMPTS = 8;
 const DRAIN_TIMEOUT_MS = 1500;
+// An open ticket's root thread is pinned (never pruned) until the ticket closes; a pin not
+// refreshed for this long lapses, so a crashed close cannot pin a record forever.
+export const PIN_MAX_MS = 30 * 24 * 60 * 60 * 1000;
 // Codex TUI's "context left" excludes a fixed baseline (prompts, tools, compaction headroom).
 const CODEX_CONTEXT_BASELINE_TOKENS = 12000;
 const TOKEN_FIELDS = ["totalTokens", "inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens"];
@@ -124,6 +127,10 @@ export function applyRateLimitsUpdate(account, snapshot, { observedAt, connectio
     return null;
   }
   const previous = account.limits[key] ?? normalizeLimit({ limitId: key }, observedAt);
+  if (Date.parse(previous.observedAt) > Date.parse(observedAt)) {
+    // Observed before what is stored (another connection committed first): never go backwards.
+    return null;
+  }
   const merged = { ...previous, limitId: previous.limitId ?? key };
   for (const window of ["primary", "secondary"]) {
     const next = normalizeWindow(snapshot[window]);
@@ -166,8 +173,8 @@ function limitFreshness(limit, fallbackObservedAt, now) {
 
 /** fresh | stale | unavailable for the whole account: the worst of its buckets, with the evidence. */
 export function accountFreshness(account, now = Date.now()) {
-  if (!account || (!account.readAt && !Object.keys(account.limits ?? {}).length)) {
-    return { status: "unavailable", reason: account?.lastError?.message ?? "never read" };
+  if (!account || !Object.keys(account.limits ?? {}).length) {
+    return { status: "unavailable", reason: account?.lastError?.message ?? (account?.readAt ? "the rate-limit read returned no limits" : "never read") };
   }
   for (const limit of Object.values(account.limits ?? {})) {
     const freshness = limitFreshness(limit, account.observedAt, now);
@@ -254,12 +261,46 @@ export function applyThreadTokenUsage(record, params, { observedAt, workspaceRoo
 
 export function pruneThreads(threads, now = Date.now()) {
   const seenAt = (record) => Date.parse(record.observedAt ?? record.annotatedAt ?? 0);
-  const recent = Object.entries(threads ?? {})
-    .filter(([, record]) => now - seenAt(record) <= THREAD_RETENTION_MS)
+  const entries = Object.entries(threads ?? {});
+  // Open tickets' roots are kept regardless of age or cap (bounded by the number of open tickets).
+  const pinned = entries.filter(([, record]) => record.pinned && now - Date.parse(record.pinned.at ?? 0) <= PIN_MAX_MS);
+  const recent = entries
+    .filter(([, record]) => !pinned.some(([, kept]) => kept === record) && now - seenAt(record) <= THREAD_RETENTION_MS)
     .sort(([, a], [, b]) => seenAt(b) - seenAt(a));
   const roots = recent.filter(([, record]) => !record.parentThreadId);
   const subagents = recent.filter(([, record]) => record.parentThreadId);
-  return Object.fromEntries([...roots, ...subagents].slice(0, MAX_THREAD_RECORDS));
+  return Object.fromEntries([...pinned, ...[...roots, ...subagents].slice(0, Math.max(0, MAX_THREAD_RECORDS - pinned.length))]);
+}
+
+/** Pin an open ticket's root thread so pruning keeps it; advisory, never throws. */
+export function pinCapacityThread(threadId, { ticketId = null, jobId = null } = {}, options = {}) {
+  if (!threadId) {
+    return false;
+  }
+  return updateCapacity((capacity) => {
+    const existing = capacity.threads[threadId] ?? { threadId };
+    capacity.threads[threadId] = { ...existing, pinned: { ticketId, jobId, at: new Date().toISOString() } };
+    return capacity;
+  }, options);
+}
+
+/** Release pins when a ticket closes; advisory, never throws. */
+export function unpinCapacityThreads(threadIds, options = {}) {
+  const ids = threadIds.filter(Boolean);
+  if (!ids.length) {
+    return false;
+  }
+  return updateCapacity((capacity) => {
+    let changed = false;
+    for (const threadId of ids) {
+      if (capacity.threads[threadId]?.pinned) {
+        const { pinned, ...rest } = capacity.threads[threadId];
+        capacity.threads[threadId] = rest;
+        changed = true;
+      }
+    }
+    return changed ? capacity : null;
+  }, options);
 }
 
 /**
@@ -327,7 +368,7 @@ export function updateCapacity(mutate, { file = resolveCapacityFile(), now = new
  * Async variant for the observer: waits for the lock without blocking the event loop. Resolves to
  * "written", "unchanged", or "failed" (lock timeout or I/O error; the caller may retry).
  */
-export async function updateCapacityAsync(mutate, { file = resolveCapacityFile() } = {}) {
+export async function updateCapacityAsync(mutate, { file = resolveCapacityFile(), timeoutMs = FLUSH_LOCK_TIMEOUT_MS } = {}) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     return await withFileLockAsync(
@@ -345,7 +386,7 @@ export async function updateCapacityAsync(mutate, { file = resolveCapacityFile()
         writeJsonAtomic(file, next);
         return "written";
       },
-      { timeoutMs: FLUSH_LOCK_TIMEOUT_MS, onTimeout: () => "failed" }
+      { timeoutMs: Math.max(1, timeoutMs), onTimeout: () => "failed" }
     );
   } catch {
     return "failed";
@@ -383,8 +424,9 @@ export function createCapacityObserver({ cwd, file } = {}) {
   let flushing = null;
   let attempts = 0;
 
-  const flush = async () => {
-    const batch = queue.splice(0);
+  const flush = async (timeoutMs = FLUSH_LOCK_TIMEOUT_MS) => {
+    // The batch stays in the queue until it is written, so nothing in flight is invisible or lost.
+    const batch = queue.slice();
     if (!batch.length) {
       return;
     }
@@ -402,13 +444,13 @@ export function createCapacityObserver({ cwd, file } = {}) {
         }
         return changed ? capacity : null;
       },
-      { file: target() }
+      { file: target(), timeoutMs }
     );
     if (outcome === "failed" && ++attempts < FLUSH_MAX_ATTEMPTS) {
-      queue.unshift(...batch);
-    } else {
-      attempts = 0;
+      return;
     }
+    queue.splice(0, batch.length);
+    attempts = 0;
   };
 
   const schedule = (delayMs = 0) => {
@@ -452,6 +494,9 @@ export function createCapacityObserver({ cwd, file } = {}) {
             connectionAccount.accountId = null;
             const message = String(error.message ?? "read failed").slice(0, 200);
             enqueue((capacity) => {
+              if (Date.parse(capacity.account?.observedAt ?? 0) > Date.parse(observedAt)) {
+                return false;
+              }
               capacity.account = { ...(capacity.account ?? { limits: {} }), lastError: { at: observedAt, message } };
               return true;
             });
@@ -462,6 +507,10 @@ export function createCapacityObserver({ cwd, file } = {}) {
           connectionAccount.known = Boolean(account.readAt && account.accountId);
           connectionAccount.accountId = connectionAccount.known ? account.accountId : null;
           enqueue((capacity) => {
+            // Several connections commit independently: an older snapshot never replaces a newer one.
+            if (Date.parse(capacity.account?.observedAt ?? 0) > Date.parse(observedAt)) {
+              return false;
+            }
             capacity.account = account;
             return true;
           });
@@ -488,7 +537,11 @@ export function createCapacityObserver({ cwd, file } = {}) {
         } else if (method === "thread/tokenUsage/updated" && params?.threadId) {
           const observedAt = new Date().toISOString();
           enqueue((capacity) => {
-            capacity.threads[params.threadId] = applyThreadTokenUsage(capacity.threads[params.threadId], params, { observedAt, workspaceRoot: workspace() });
+            const existing = capacity.threads[params.threadId];
+            if (Date.parse(existing?.observedAt ?? 0) > Date.parse(observedAt)) {
+              return false;
+            }
+            capacity.threads[params.threadId] = applyThreadTokenUsage(existing, params, { observedAt, workspaceRoot: workspace() });
             return true;
           });
         } else if (method === "thread/started" && params?.thread?.id && params.thread.parentThreadId) {
@@ -498,7 +551,11 @@ export function createCapacityObserver({ cwd, file } = {}) {
         // Telemetry is advisory.
       }
     },
-    /** Bounded final flush (on connection close): never throws, never waits longer than the bound. */
+    /**
+     * Bounded final flush on connection close. Never throws. Each lock attempt gets only the
+     * remaining budget, so it returns within DRAIN_TIMEOUT_MS plus at most one local file write;
+     * observations still queued at the deadline are dropped (telemetry is advisory).
+     */
     async drain(timeoutMs = DRAIN_TIMEOUT_MS) {
       const deadline = Date.now() + timeoutMs;
       const remaining = () => Math.max(0, deadline - Date.now());
@@ -509,12 +566,13 @@ export function createCapacityObserver({ cwd, file } = {}) {
             clearTimeout(timer);
             timer = null;
           }
-          flushing = flush()
+          flushing = flush(remaining())
             .catch(() => {})
             .finally(() => {
               flushing = null;
             });
         }
+        // A flush started before drain may carry the normal lock wait; never wait past the budget.
         await Promise.race([flushing, new Promise((resolve) => setTimeout(resolve, remaining()))]);
         if (queue.length && attempts) {
           await new Promise((resolve) => setTimeout(resolve, Math.min(FLUSH_RETRY_MS, remaining())));
