@@ -351,3 +351,76 @@ test("a followup whose thread cannot be resumed continues on a fresh thread with
   assert.match(prompt, /<previous_turns>[\s\S]*could no longer be resumed \(paginated_threads is not supported yet\)/);
   assert.match(prompt, /Dig into the second hypothesis/);
 });
+
+// ------------------------------------------------------------------------------------------
+// Capacity telemetry (account/rateLimits/read, account/rateLimits/updated, thread/tokenUsage/updated)
+
+function capacityFileForTest() {
+  const file = path.join(makeTempDir(), "capacity.json");
+  process.env.CODEX_COMPANION_CAPACITY_FILE = file;
+  return file;
+}
+
+function readCapacityFile(file) {
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+}
+
+test("a direct worker records the account snapshot and its thread's active context", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "telemetry" }, async () => {
+    const file = capacityFileForTest();
+    const dir = repo();
+    const result = await runAppServerTurn(dir, { prompt: "work", sandbox: "read-only", disableBroker: true });
+    assert.equal(result.status, 0);
+    const capacity = await waitFor(() => {
+      const current = readCapacityFile(file);
+      return current?.account?.readAt && current.threads?.[result.threadId]?.tokenUsage ? current : null;
+    });
+    assert.deepEqual(Object.keys(capacity.account.limits).sort(), ["codex", "codex_spark"], "every native bucket is kept");
+    assert.equal(capacity.account.accountId, "acct-substrate");
+    const thread = capacity.threads[result.threadId];
+    assert.equal(thread.model, "fake", "model from Codex's own thread/start response");
+    assert.equal(thread.tokenUsage.total.totalTokens, 900000, "raw cumulative total preserved");
+    assert.equal(thread.context.usedTokens, 25840, "active context is last.totalTokens");
+    assert.equal(thread.context.usedPercent, 10, "25840 / 258400, not 900000 / 258400");
+    assert.deepEqual(result.tokenUsage.total.totalTokens, 900000, "runAppServerTurn's own tokenUsage is unchanged");
+  }));
+
+// The broker delivers notifications only to an active client; an account update that arrives after
+// the turn completed used to be dropped. The broker's own upstream connection now records it.
+test("an account update arriving after the turn is recorded on the broker path", (t) =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "telemetry" }, async () => {
+    const file = capacityFileForTest();
+    const dir = repo();
+    t.after(async () => {
+      const session = loadBrokerSession(dir);
+      if (session?.endpoint) {
+        await sendBrokerShutdown(session.endpoint).catch(() => {});
+      }
+    });
+    const result = await runAppServerTurn(dir, { prompt: "work", sandbox: "read-only" });
+    assert.equal(result.status, 0);
+    assert.ok(loadBrokerSession(dir), "the turn ran through the shared broker");
+    const capacity = await waitFor(() => {
+      const current = readCapacityFile(file);
+      return current?.account?.source === "update" ? current : null;
+    });
+    const codex = capacity.account.limits.codex;
+    assert.equal(codex.primary.usedPercent, 77, "the sparse update was merged");
+    assert.equal(codex.secondary.usedPercent, 40, "a null secondary in the update kept the previous window");
+    assert.equal(codex.planType, "plus", "a null planType in the update kept the previous value");
+    assert.ok(capacity.account.limits.codex_spark, "the other bucket survived the sparse update");
+    assert.equal(capacity.threads[result.threadId].context.usedTokens, 25840);
+  }));
+
+test("an older Codex without account/rateLimits/read degrades to unavailable, and the turn still succeeds", () =>
+  withEnv({ FAKE_SUBSTRATE_MODE: "rate-limits-unsupported" }, async () => {
+    const file = capacityFileForTest();
+    const dir = repo();
+    const result = await runAppServerTurn(dir, { prompt: "work", sandbox: "read-only", disableBroker: true });
+    assert.equal(result.status, 0, "telemetry failure never fails the turn");
+    const capacity = await waitFor(() => readCapacityFile(file)?.account?.lastError ? readCapacityFile(file) : null);
+    assert.match(capacity.account.lastError.message, /unsupported/);
+    assert.deepEqual(capacity.account.limits, {}, "no fabricated limits");
+    const { accountFreshness } = await import("../plugins/codex/scripts/lib/capacity.mjs");
+    assert.equal(accountFreshness(capacity.account).status, "unavailable");
+  }));

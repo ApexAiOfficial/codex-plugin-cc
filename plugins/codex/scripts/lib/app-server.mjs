@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
+import { createCapacityObserver } from "./capacity.mjs";
 import { terminateProcessTree } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
@@ -92,6 +93,8 @@ class AppServerClientBase {
     this.cwd = cwd;
     this.options = options;
     this.pending = new Map();
+    /** @type {ReturnType<typeof createCapacityObserver> | null} */
+    this.capacityObserver = null;
     this.nextId = 1;
     this.stderr = "";
     this.closed = false;
@@ -201,6 +204,7 @@ class AppServerClientBase {
         return;
       }
       this.pending.delete(message.id);
+      this.capacityObserver?.onResponse(pending.method, message.result, message.error);
 
       if (message.error) {
         pending.reject(createProtocolError(message.error.message ?? `codex app-server ${pending.method} failed.`, message.error));
@@ -210,6 +214,9 @@ class AppServerClientBase {
       return;
     }
 
+    if (message.method) {
+      this.capacityObserver?.onNotification(message.method, message.params);
+    }
     if (message.method && this.notificationHandler) {
       this.notificationHandler(/** @type {AppServerNotification} */ (message));
     }
@@ -246,6 +253,9 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   constructor(cwd, options = {}) {
     super(cwd, options);
     this.transport = "direct";
+    // Capacity telemetry is observed where the real app-server is (direct workers and the shared
+    // broker's own upstream connection), never on broker clients, so nothing is recorded twice.
+    this.capacityObserver = createCapacityObserver({ cwd });
   }
 
   async initialize() {

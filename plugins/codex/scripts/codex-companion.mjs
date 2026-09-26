@@ -18,8 +18,10 @@ import {
     parseStructuredOutput,
     readOutputSchema,
     runAppServerReview,
-    runAppServerTurn
+    runAppServerTurn,
+    withCodexClient
   } from "./lib/codex.mjs";
+import { requestAccountRateLimits } from "./lib/capacity.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectDoctorReport, renderDoctorReport } from "./lib/doctor.mjs";
@@ -942,11 +944,15 @@ function companionContext() {
 async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
-    booleanOptions: ["json", "all", "wait"]
+    booleanOptions: ["json", "all", "wait", "refresh-capacity"]
   });
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+  if (options["refresh-capacity"]) {
+    // One no-model account/rateLimits/read on a private app-server; the capacity observer records it.
+    await withCodexClient(cwd, (client) => requestAccountRateLimits(client), { direct: true }).catch(() => {});
+  }
   if (reference) {
     const snapshot = options.wait
       ? await waitForSingleJobSnapshot(cwd, reference, {

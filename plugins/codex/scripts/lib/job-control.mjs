@@ -1,5 +1,6 @@
 import fs from "node:fs";
 
+import { buildCapacityView } from "./capacity.mjs";
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 import { listTickets } from "./tickets.mjs";
@@ -230,6 +231,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
     .filter((job) => job.status !== "queued" && job.status !== "running" && job.id !== latestFinished?.id)
     .map((job) => enrichJob(job, { maxProgressLines }));
 
+  const tickets = listTickets(workspaceRoot);
   return {
     workspaceRoot,
     config,
@@ -237,9 +239,31 @@ export function buildStatusSnapshot(cwd, options = {}) {
     running,
     latestFinished,
     recent,
-    tickets: listTickets(workspaceRoot),
-    needsReview: Boolean(config.stopReviewGate)
+    tickets,
+    needsReview: Boolean(config.stopReviewGate),
+    capacity: buildCapacityView(workspaceRoot, capacityJobs(listJobs(workspaceRoot), tickets))
   };
+}
+
+const MAX_CAPACITY_THREADS = 8;
+
+/** The threads whose context matters now: running jobs and each open ticket's latest job, one per thread. */
+function capacityJobs(jobs, tickets) {
+  const newestFirst = sortJobsNewestFirst(jobs.filter((job) => job.threadId));
+  const ticketJobIds = new Set(tickets.map((ticket) => ticket.activeJobId ?? ticket.lastJobId).filter(Boolean));
+  const ordered = [
+    ...newestFirst.filter((job) => job.status === "queued" || job.status === "running"),
+    ...newestFirst.filter((job) => ticketJobIds.has(job.id))
+  ];
+  const seen = new Set();
+  const picked = [];
+  for (const job of ordered) {
+    if (!seen.has(job.threadId)) {
+      seen.add(job.threadId);
+      picked.push(job);
+    }
+  }
+  return picked.slice(0, MAX_CAPACITY_THREADS);
 }
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {

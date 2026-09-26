@@ -41,6 +41,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   switch (message.method) {
     case "initialize":
       return send({ id: message.id, result: { userAgent: "substrate-fake" } });
+    case "account/rateLimits/read": {
+      if (MODE === "rate-limits-unsupported") {
+        return send({ id: message.id, error: { code: -32601, message: "unsupported account/rateLimits/read" } });
+      }
+      const bucket = (limitId, used) => ({ limitId, limitName: null, normalModelSlug: null, primary: { usedPercent: used, windowDurationMins: 300, resetsAt: 4102444800 }, secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 4102444800 }, credits: null, individualLimit: null, spendControlReached: null, planType: "plus", rateLimitReachedType: null });
+      return send({ id: message.id, result: { accountId: "acct-substrate", ordinaryUsageAllowed: true, rateLimits: bucket("codex", 10), rateLimitsByLimitId: { codex: bucket("codex", 10), codex_spark: bucket("codex_spark", 3) }, rateLimitResetCredits: null, rateLimitUpsell: null } });
+    }
     case "thread/start": {
       if (MODE === "hang-thread-start") return;
       // Unique across fake instances so tests sharing one log never confuse threads.
@@ -116,6 +123,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         return;
       }
       if (MODE === "hang-turn") {
+        return;
+      }
+      if (MODE === "telemetry") {
+        send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: {
+          total: { totalTokens: 900000, inputTokens: 880000, cachedInputTokens: 700000, cacheWriteInputTokens: 0, outputTokens: 20000, reasoningOutputTokens: 5000 },
+          last: { totalTokens: 25840, inputTokens: 25000, cachedInputTokens: 20000, cacheWriteInputTokens: 0, outputTokens: 840, reasoningOutputTokens: 100 },
+          modelContextWindow: 258400
+        } } });
+        record.status = "idle";
+        complete(threadId, turnId, "fake turn done");
+        // After turn/completed: the broker has no active client when this arrives.
+        setTimeout(() => send({ method: "account/rateLimits/updated", params: { rateLimits: { limitId: "codex", limitName: null, normalModelSlug: null, primary: { usedPercent: 77, windowDurationMins: 300, resetsAt: 4102444800 }, secondary: null, credits: null, individualLimit: null, spendControlReached: null, planType: null, rateLimitReachedType: null } } }), 150);
         return;
       }
       record.status = "idle";

@@ -44,6 +44,7 @@ import path from "node:path";
 import { readJsonFile } from "./fs.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient, resolveCodexBinary } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
+import { requestAccountRateLimits, settleAccountRead } from "./capacity.mjs";
 import { binaryAvailable } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
@@ -1169,6 +1170,7 @@ export async function runAppServerReview(cwd, options = {}) {
     });
     const delivery = options.delivery ?? "inline";
 
+    let accountRead = null;
     const turnState = await captureTurn(
       client,
       sourceThreadId,
@@ -1180,6 +1182,9 @@ export async function runAppServerReview(cwd, options = {}) {
         }),
       {
         onProgress: options.onProgress,
+        onTurnStarted: () => {
+          accountRead = requestAccountRateLimits(client);
+        },
         onResponse(response, state) {
           if (response.reviewThreadId) {
             state.threadIds.add(response.reviewThreadId);
@@ -1191,6 +1196,7 @@ export async function runAppServerReview(cwd, options = {}) {
       }
     );
 
+    await settleAccountRead(accountRead);
     return {
       status: buildResultStatus(turnState),
       threadId: turnState.threadId,
@@ -1290,11 +1296,17 @@ export async function runAppServerTurn(cwd, options = {}) {
       // per-turn override persists to later turns, so privilege must be decided on every turn.
       sandboxPolicy: options.sandboxPolicy ?? buildTurnSandboxPolicy(cwd, options.sandbox, threadResponse?.sandbox)
     };
+    let accountRead = null;
     const turnState = await captureTurn(client, threadId, () => client.request("turn/start", turnParams), {
       onProgress: options.onProgress,
-      onTurnStarted: (turn) => options.controller?.attach({ client, ...turn }),
+      onTurnStarted: (turn) => {
+        options.controller?.attach({ client, ...turn });
+        // A no-model account snapshot for capacity telemetry; not awaited, never fatal.
+        accountRead = requestAccountRateLimits(client);
+      },
       onTurnFinished: () => options.controller?.detach()
     });
+    await settleAccountRead(accountRead);
 
     return {
       status: buildResultStatus(turnState),
