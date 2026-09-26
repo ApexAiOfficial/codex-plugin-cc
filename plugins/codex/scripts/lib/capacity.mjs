@@ -139,6 +139,55 @@ export function applyRateLimitsRead(result, { observedAt, observedKey = Date.par
   };
 }
 
+function recordKey(record) {
+  if (!record) {
+    return Number.NEGATIVE_INFINITY;
+  }
+  const key = isNumber(record.observedKey) ? record.observedKey : Date.parse(record.observedAt ?? "");
+  return Number.isFinite(key) ? key : Number.NEGATIVE_INFINITY;
+}
+
+/** The newest observation anywhere in an account record (the account itself or any bucket). */
+export function newestAccountKey(account) {
+  return Math.max(recordKey(account), ...Object.values(account?.limits ?? {}).map(recordKey));
+}
+
+/**
+ * Apply a complete read to the stored account. For the same account each bucket keeps whichever
+ * observation is newer, so a read committed late by another connection never regresses a bucket
+ * that was updated since; a stored bucket the (newer) read no longer lists is dropped. A read for
+ * another account replaces everything, but only if it is newer than every stored observation, so
+ * two accounts are never mixed. Returns null when nothing should change.
+ */
+export function mergeRateLimitsRead(stored, read) {
+  if (!stored || !Object.keys(stored.limits ?? {}).length) {
+    return mayReplace(read.observedKey, isNumber(stored?.observedKey) ? stored.observedKey : null, stored?.observedAt) ? read : null;
+  }
+  if (stored.accountId !== read.accountId) {
+    return mayReplace(read.observedKey, newestAccountKey(stored), null) ? read : null;
+  }
+  const limits = {};
+  for (const key of new Set([...Object.keys(read.limits), ...Object.keys(stored.limits)])) {
+    const incoming = read.limits[key];
+    const existing = stored.limits[key];
+    if (incoming && (!existing || mayReplace(incoming.observedKey, existing.observedKey, existing.observedAt))) {
+      limits[key] = incoming;
+    } else if (existing && (incoming || !mayReplace(read.observedKey, existing.observedKey, existing.observedAt))) {
+      limits[key] = existing;
+    }
+  }
+  const newest = Math.max(read.observedKey, newestAccountKey(stored));
+  const usable = Object.keys(limits).length > 0;
+  return {
+    ...read,
+    limits,
+    readAt: usable ? read.readAt ?? stored.readAt ?? null : null,
+    lastError: usable ? null : read.lastError,
+    observedKey: newest,
+    observedAt: newest === read.observedKey ? read.observedAt : stored.observedAt
+  };
+}
+
 /**
  * Merge a sparse `account/rateLimits/updated` snapshot. It carries no account id, so it is only
  * merged when the connection that delivered it last read this same, non-null account id; anything
@@ -172,7 +221,16 @@ export function applyRateLimitsUpdate(account, snapshot, { observedAt, observedK
   }
   merged.observedAt = observedAt;
   merged.observedKey = observedKey;
-  return { ...account, limits: { ...account.limits, [key]: merged }, observedAt, observedKey, source: "update" };
+  // The account's key only moves forward: a late update for one bucket must not lower it below a
+  // newer observation of another bucket.
+  const newer = observedKey >= newestAccountKey(account);
+  return {
+    ...account,
+    limits: { ...account.limits, [key]: merged },
+    observedAt: newer ? observedAt : account.observedAt,
+    observedKey: Math.max(observedKey, newestAccountKey(account)),
+    source: "update"
+  };
 }
 
 /** Display-only alias for a window duration; the stored duration is always the real one. */
@@ -530,7 +588,7 @@ export function createCapacityObserver({ cwd, file } = {}) {
             connectionAccount.accountId = null;
             const message = String(error.message ?? "read failed").slice(0, 200);
             enqueue((capacity) => {
-              if (!mayReplace(observedKey, capacity.account?.observedKey, capacity.account?.observedAt)) {
+              if (!mayReplace(observedKey, capacity.account ? newestAccountKey(capacity.account) : null, null)) {
                 return false;
               }
               capacity.account = { ...(capacity.account ?? { limits: {} }), lastError: { at: observedAt, message } };
@@ -544,10 +602,11 @@ export function createCapacityObserver({ cwd, file } = {}) {
           connectionAccount.accountId = connectionAccount.known ? account.accountId : null;
           enqueue((capacity) => {
             // Several connections commit independently: an older snapshot never replaces a newer one.
-            if (!mayReplace(observedKey, capacity.account?.observedKey, capacity.account?.observedAt)) {
+            const merged = mergeRateLimitsRead(capacity.account, account);
+            if (!merged) {
               return false;
             }
-            capacity.account = account;
+            capacity.account = merged;
             return true;
           });
         } else if (!error && (method === "thread/start" || method === "thread/resume" || method === "thread/fork") && result?.thread?.id) {
