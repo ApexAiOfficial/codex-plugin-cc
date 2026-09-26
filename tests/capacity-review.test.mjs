@@ -282,3 +282,25 @@ test("a late update for one bucket never lets an older read regress another buck
   assert.deepEqual(Object.keys(mergeRateLimitsRead(merged, laterOther).limits).sort(), ["a", "b"]);
   assert.equal(mergeRateLimitsRead(merged, laterOther).accountId, "acct-2", "a newer read of another account replaces everything");
 });
+
+// ---- Turn 5 residual (re-review of a15d8c3) ----
+
+// An older full read, committed late, resurrected a bucket a newer read had removed and rolled
+// back account-level fields.
+test("an older full read neither resurrects a removed bucket nor rolls back account fields", async () => {
+  const { applyRateLimitsUpdate, mergeRateLimitsRead } = await import("../plugins/codex/scripts/lib/capacity.mjs");
+  const at = (key) => new Date(Date.parse("2026-09-26T12:00:00.000Z") + key).toISOString();
+  const readOf = (buckets, allowed, key) =>
+    applyRateLimitsRead({ accountId: "acct", ordinaryUsageAllowed: allowed, rateLimits: buckets[0], rateLimitsByLimitId: Object.fromEntries(buckets.map((entry) => [entry.limitId, entry])) }, { observedAt: at(key), observedKey: key });
+  let account = readOf([bucket("a", 10), bucket("b", 10)], true, 10);
+  account = mergeRateLimitsRead(account, readOf([bucket("a", 30)], false, 30));
+  assert.deepEqual(Object.keys(account.limits), ["a"]);
+  assert.equal(mergeRateLimitsRead(account, readOf([bucket("a", 20), bucket("b", 20)], true, 20)), null, "the older read is ignored");
+
+  // A sparse update observed after a read survives the next read, which is older than that update.
+  const gate = { known: true, accountId: "acct" };
+  let refined = readOf([bucket("a", 10)], true, 10);
+  refined = applyRateLimitsUpdate(refined, bucket("a", 44), { observedAt: at(40), observedKey: 40, connectionAccount: gate });
+  refined = mergeRateLimitsRead(refined, readOf([bucket("a", 30)], true, 30));
+  assert.equal(refined.limits.a.primary.usedPercent, 44, "the later update is kept over the read taken before it");
+});

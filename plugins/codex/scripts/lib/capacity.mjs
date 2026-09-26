@@ -132,6 +132,8 @@ export function applyRateLimitsRead(result, { observedAt, observedKey = Date.par
     limits,
     // A read with no usable limits is not a snapshot: telemetry is unavailable, not "fresh".
     readAt: usable ? observedAt : null,
+    // A read is a complete snapshot: the newest applied read defines the bucket set.
+    readKey: observedKey,
     observedAt,
     observedKey,
     source: "read",
@@ -153,26 +155,28 @@ export function newestAccountKey(account) {
 }
 
 /**
- * Apply a complete read to the stored account. For the same account each bucket keeps whichever
- * observation is newer, so a read committed late by another connection never regresses a bucket
- * that was updated since; a stored bucket the (newer) read no longer lists is dropped. A read for
- * another account replaces everything, but only if it is newer than every stored observation, so
- * two accounts are never mixed. Returns null when nothing should change.
+ * Apply a complete read to the stored account. A read is a complete snapshot, so the newest applied
+ * read defines the bucket set and the account-level fields: a read older than the last applied
+ * read is ignored (it must not resurrect a removed bucket or roll back fields). A newer read takes
+ * its own buckets but keeps any stored bucket observed after it was taken (a later sparse update).
+ * A read for another account replaces everything, but only if it is newer than every stored
+ * observation, so two accounts are never mixed. Returns null when nothing should change.
  */
 export function mergeRateLimitsRead(stored, read) {
-  if (!stored || !Object.keys(stored.limits ?? {}).length) {
-    return mayReplace(read.observedKey, isNumber(stored?.observedKey) ? stored.observedKey : null, stored?.observedAt) ? read : null;
+  if (!stored) {
+    return read;
   }
   if (stored.accountId !== read.accountId) {
     return mayReplace(read.observedKey, newestAccountKey(stored), null) ? read : null;
   }
-  const limits = {};
-  for (const key of new Set([...Object.keys(read.limits), ...Object.keys(stored.limits)])) {
-    const incoming = read.limits[key];
-    const existing = stored.limits[key];
-    if (incoming && (!existing || mayReplace(incoming.observedKey, existing.observedKey, existing.observedAt))) {
-      limits[key] = incoming;
-    } else if (existing && (incoming || !mayReplace(read.observedKey, existing.observedKey, existing.observedAt))) {
+  const lastReadKey = isNumber(stored.readKey) ? stored.readKey : Date.parse(stored.readAt ?? "");
+  if (!mayReplace(read.observedKey, Number.isFinite(lastReadKey) ? lastReadKey : null, null)) {
+    return null;
+  }
+  const limits = { ...read.limits };
+  for (const [key, existing] of Object.entries(stored.limits ?? {})) {
+    // Strictly newer than the read, and not a future (untrusted) stamp from a clock change.
+    if (!mayReplace(read.observedKey, existing.observedKey, existing.observedAt)) {
       limits[key] = existing;
     }
   }
