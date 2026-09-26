@@ -397,6 +397,17 @@ test("status --json reports account limits and a ticket's active context, never 
   assert.match(human, /- ticket ctx: context 25% used \(64600\/258400 tokens\)/);
 });
 
+// Regression (found dogfooding): a worktree ticket's worker records its thread from the worktree,
+// and status dropped it by comparing that path with the main workspace.
+test("a worktree ticket's context appears in the main workspace's status", () => {
+  const ctx = setupRepo();
+  const env = capacityEnv(ctx);
+  delegateAndWait({ ...ctx, env }, ["--ticket", "iso", "--isolation", "worktree", "Work.\nFAKE_WRITE src/w.js 1"]);
+  const thread = companionJson(["status"], { cwd: ctx.repo, env }).capacity.threads.find((entry) => entry.ticketId === "iso");
+  assert.ok(thread, "the worktree ticket's thread is listed");
+  assert.equal(thread.context.usedTokens, 64600);
+});
+
 test("a corrupt capacity file or an older Codex leaves status working and reports telemetry as unavailable", () => {
   const ctx = setupRepo("rate-limits-unsupported");
   const env = capacityEnv(ctx);

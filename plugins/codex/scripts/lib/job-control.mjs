@@ -241,7 +241,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
     recent,
     tickets,
     needsReview: Boolean(config.stopReviewGate),
-    capacity: buildCapacityView(workspaceRoot, capacityJobs(listJobs(workspaceRoot), tickets))
+    capacity: buildCapacityView(capacityJobs(listJobs(workspaceRoot), tickets))
   };
 }
 

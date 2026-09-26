@@ -6,6 +6,9 @@ import type {
   ServerNotification
 } from "../../.generated/app-server-types/index.js";
 import type {
+  AccountRateLimitsUpdatedNotification,
+  GetAccountRateLimitsParams,
+  GetAccountRateLimitsResponse,
   CommandExecParams,
   CommandExecResponse,
   ThreadReadParams,
@@ -39,6 +42,8 @@ import type {
 } from "../../.generated/app-server-types/v2/index.js";
 
 export type {
+  AccountRateLimitsUpdatedNotification,
+  GetAccountRateLimitsResponse,
   ClientInfo,
   InitializeCapabilities,
   InitializeParams,
@@ -80,6 +85,7 @@ export interface AppServerMethodMap {
   "thread/read": { params: ThreadReadParams; result: ThreadReadResponse };
   "thread/unsubscribe": { params: ThreadUnsubscribeParams; result: ThreadUnsubscribeResponse };
   "command/exec": { params: CommandExecParams; result: CommandExecResponse };
+  "account/rateLimits/read": { params: GetAccountRateLimitsParams | undefined; result: GetAccountRateLimitsResponse };
 }
 
 export type AppServerMethod = keyof AppServerMethodMap;
