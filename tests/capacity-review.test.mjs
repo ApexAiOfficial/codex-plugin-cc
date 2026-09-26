@@ -256,3 +256,29 @@ test("pinned records are bounded by the record cap too", () => {
   assert.equal(Object.keys(kept).length, MAX_THREAD_RECORDS);
   assert.ok(kept["pin-0"] && !kept[`pin-${MAX_THREAD_RECORDS}`], "the newest pins are kept");
 });
+
+// ---- Turn 4 residual (re-review of a8e8ebc) ----
+
+// A delayed update for one bucket lowered the account-wide key; a later, older full read was then
+// accepted and overwrote a newer observation of another bucket.
+test("a late update for one bucket never lets an older read regress another bucket", async () => {
+  const { applyRateLimitsUpdate, mergeRateLimitsRead } = await import("../plugins/codex/scripts/lib/capacity.mjs");
+  const at = (key) => new Date(Date.parse("2026-09-26T12:00:00.000Z") + key).toISOString();
+  const twoBuckets = (used) => ({ accountId: "acct", ordinaryUsageAllowed: true, rateLimits: bucket("a", used), rateLimitsByLimitId: { a: bucket("a", used), b: bucket("b", used) } });
+  const gate = { known: true, accountId: "acct" };
+  let account = applyRateLimitsRead(twoBuckets(10), { observedAt: at(10), observedKey: 10 });
+  account = applyRateLimitsUpdate(account, bucket("b", 30), { observedAt: at(30), observedKey: 30, connectionAccount: gate });
+  account = applyRateLimitsUpdate(account, bucket("a", 20), { observedAt: at(20), observedKey: 20, connectionAccount: gate });
+  assert.equal(account.observedKey, 30, "the account key never moves backwards");
+
+  const merged = mergeRateLimitsRead(account, applyRateLimitsRead(twoBuckets(25), { observedAt: at(25), observedKey: 25 }));
+  assert.equal(merged.limits.b.primary.usedPercent, 30, "bucket b keeps its newer observation");
+  assert.equal(merged.limits.a.primary.usedPercent, 25, "bucket a takes the newer read");
+  assert.equal(merged.observedKey, 30);
+
+  const otherAccount = applyRateLimitsRead({ ...twoBuckets(5), accountId: "acct-2" }, { observedAt: at(25), observedKey: 25 });
+  assert.equal(mergeRateLimitsRead(merged, otherAccount), null, "an older read of another account never mixes in");
+  const laterOther = applyRateLimitsRead({ ...twoBuckets(5), accountId: "acct-2" }, { observedAt: at(40), observedKey: 40 });
+  assert.deepEqual(Object.keys(mergeRateLimitsRead(merged, laterOther).limits).sort(), ["a", "b"]);
+  assert.equal(mergeRateLimitsRead(merged, laterOther).accountId, "acct-2", "a newer read of another account replaces everything");
+});
