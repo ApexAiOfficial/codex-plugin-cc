@@ -206,6 +206,12 @@ export function applyRateLimitsUpdate(account, snapshot, { observedAt, observedK
   if (!key) {
     return null;
   }
+  // The last complete read is authoritative for everything observed before it, including buckets
+  // it no longer lists: an older sparse update must not refine or resurrect anything.
+  const lastReadKey = isNumber(account.readKey) ? account.readKey : Date.parse(account.readAt ?? "");
+  if (!mayReplace(observedKey, Number.isFinite(lastReadKey) ? lastReadKey : null, null)) {
+    return null;
+  }
   const previous = account.limits[key] ?? normalizeLimit({ limitId: key }, observedAt, observedKey);
   if (!mayReplace(observedKey, previous.observedKey, previous.observedAt)) {
     // Observed before what is stored (another connection committed first): never go backwards.
