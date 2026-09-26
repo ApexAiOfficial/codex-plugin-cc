@@ -127,3 +127,68 @@ test("a running job without an observation from its current turn is stale", () =
   assert.equal(threadFreshness(record, { status: "running", turnId: "old-turn" }).status, "fresh");
   assert.equal(threadFreshness(record, { status: "completed", turnId: "old-turn" }).status, "fresh");
 });
+
+// ---- Turn 2 residuals (re-review of 885f805) ----
+
+// Several connections commit independently; the last to take the lock used to win even with older data.
+test("an older observation from another connection never overwrites a newer one", async () => {
+  const file = path.join(makeTempDir(), "capacity.json");
+  const older = createCapacityObserver({ file });
+  const newer = createCapacityObserver({ file });
+  older.onResponse("account/rateLimits/read", readResult("acct-old", 10));
+  older.onNotification("thread/tokenUsage/updated", tokenParams("shared-thread", 1000));
+  // A synchronous pause: later timestamps for `newer`, and no timer (older's flush) can run meanwhile.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  newer.onResponse("account/rateLimits/read", readResult("acct-new", 70));
+  newer.onNotification("thread/tokenUsage/updated", tokenParams("shared-thread", 2000));
+  // newer commits first (drain flushes synchronously up to the write); older's flush lands after it.
+  await newer.drain();
+  await older.drain();
+  const capacity = readCapacity(file);
+  assert.equal(capacity.account.accountId, "acct-new");
+  assert.equal(capacity.account.limits.codex.primary.usedPercent, 70);
+  assert.equal(capacity.threads["shared-thread"].context.usedTokens, 2000);
+});
+
+// drain returned while its batch was in flight (pendingCount 0) and could lose it; it also outran its bound.
+test("drain keeps an unwritten batch queued and stays within its budget", async (t) => {
+  const file = path.join(makeTempDir(), "capacity.json");
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => holder.kill("SIGKILL"));
+  fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: holder.pid, token: "held", acquiredAt: new Date().toISOString() }));
+  const observer = createCapacityObserver({ file });
+  observer.onNotification("thread/tokenUsage/updated", tokenParams("thread-held", 3000));
+  const started = Date.now();
+  await observer.drain(300);
+  assert.ok(Date.now() - started < 900, `drain returned in ${Date.now() - started} ms`);
+  assert.equal(observer.pendingCount(), 1, "the unwritten observation is still queued, not silently gone");
+  holder.kill("SIGKILL");
+  await observer.drain(3000);
+  assert.equal(readCapacity(file).threads["thread-held"]?.context.usedTokens, 3000);
+});
+
+// Root priority alone still let 256 newer roots (or 7 idle days) evict an open ticket's root.
+test("an open ticket's pinned root survives age and cap pruning until it is unpinned", async () => {
+  const { pinCapacityThread, unpinCapacityThreads, THREAD_RETENTION_MS } = await import("../plugins/codex/scripts/lib/capacity.mjs");
+  const now = Date.now();
+  const threads = { ticketRoot: { threadId: "ticketRoot", observedAt: new Date(now - THREAD_RETENTION_MS - 60000).toISOString(), pinned: { ticketId: "t1", at: new Date(now).toISOString() } } };
+  for (let index = 0; index < MAX_THREAD_RECORDS + 5; index += 1) {
+    threads[`root-${index}`] = { threadId: `root-${index}`, observedAt: new Date(now - index).toISOString() };
+  }
+  const kept = pruneThreads(threads, now);
+  assert.ok(kept.ticketRoot, "pinned despite being older than the retention and behind 256 newer roots");
+  assert.equal(Object.keys(kept).length, MAX_THREAD_RECORDS);
+
+  const file = path.join(makeTempDir(), "capacity.json");
+  assert.equal(pinCapacityThread("thread-x", { ticketId: "t1", jobId: "job-1" }, { file }), true);
+  assert.equal(readCapacity(file).threads["thread-x"].pinned.ticketId, "t1");
+  assert.equal(unpinCapacityThreads(["thread-x"], { file }), true);
+  // Unpinned, a record that never had an observation has nothing left to keep and is pruned.
+  assert.equal(readCapacity(file).threads["thread-x"]?.pinned, undefined);
+});
+
+// A 4cc5432-era record (readAt set, no limits) stayed fresh forever under the same schema version.
+test("an empty limit map is unavailable even when it carries a read time", () => {
+  const legacy = { accountId: "acct", readAt: "2026-09-01T00:00:00.000Z", observedAt: "2026-09-01T00:00:00.000Z", limits: {} };
+  assert.equal(accountFreshness(legacy, Date.parse("2026-09-26T00:00:00.000Z")).status, "unavailable");
+});
