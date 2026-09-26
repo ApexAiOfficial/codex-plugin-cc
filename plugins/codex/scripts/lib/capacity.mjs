@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { performance } from "node:perf_hooks";
 
 import { withFileLock, withFileLockAsync, writeJsonAtomic } from "./locking.mjs";
 import { resolveStateRootDir } from "./state.mjs";
@@ -44,6 +45,30 @@ const DRAIN_TIMEOUT_MS = 1500;
 // An open ticket's root thread is pinned (never pruned) until the ticket closes; a pin not
 // refreshed for this long lapses, so a crashed close cannot pin a record forever.
 export const PIN_MAX_MS = 30 * 24 * 60 * 60 * 1000;
+// A stored observation this far in the future (a clock that was later corrected) is not trusted to
+// block newer data, and is reported stale.
+export const CLOCK_SKEW_TOLERANCE_MS = 5000;
+
+/** Sub-millisecond ordering key for an observation (wall-clock anchored, monotonic within a process). */
+export function observationKey() {
+  return performance.timeOrigin + performance.now();
+}
+
+/**
+ * May an observation keyed `incoming` replace what is stored? Several connections commit to one
+ * file independently, so an older observation must never overwrite a newer one. Legacy records
+ * without a key fall back to their parsed `observedAt`; a stored key in the future is untrusted.
+ */
+export function mayReplace(incoming, storedKey, storedObservedAt, now = Date.now()) {
+  const stored = isNumber(storedKey) ? storedKey : Date.parse(storedObservedAt ?? "");
+  if (!Number.isFinite(stored) || !isNumber(incoming)) {
+    return true;
+  }
+  if (stored > now + CLOCK_SKEW_TOLERANCE_MS) {
+    return true;
+  }
+  return incoming >= stored;
+}
 // Codex TUI's "context left" excludes a fixed baseline (prompts, tools, compaction headroom).
 const CODEX_CONTEXT_BASELINE_TOKENS = 12000;
 const TOKEN_FIELDS = ["totalTokens", "inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens"];
@@ -75,29 +100,30 @@ function normalizeWindow(window) {
   };
 }
 
-function normalizeLimit(snapshot, observedAt) {
+function normalizeLimit(snapshot, observedAt, observedKey = Date.parse(observedAt)) {
   const limit = { limitId: snapshot?.limitId ?? null, primary: normalizeWindow(snapshot?.primary), secondary: normalizeWindow(snapshot?.secondary) };
   for (const field of LIMIT_FIELDS) {
     limit[field] = snapshot?.[field] ?? null;
   }
   limit.observedAt = observedAt;
+  limit.observedKey = observedKey;
   return limit;
 }
 
 /** A complete `account/rateLimits/read` result replaces the account record (also on account switch). */
-export function applyRateLimitsRead(result, { observedAt }) {
+export function applyRateLimitsRead(result, { observedAt, observedKey = Date.parse(observedAt) }) {
   const limits = {};
   const byId = result?.rateLimitsByLimitId;
   if (byId && typeof byId === "object") {
     for (const [key, snapshot] of Object.entries(byId)) {
       if (snapshot) {
-        limits[key] = normalizeLimit({ ...snapshot, limitId: snapshot.limitId ?? key }, observedAt);
+        limits[key] = normalizeLimit({ ...snapshot, limitId: snapshot.limitId ?? key }, observedAt, observedKey);
       }
     }
   }
   if (Object.keys(limits).length === 0 && result?.rateLimits) {
     // Single-bucket view. With no limitId from Codex the key is "default"; limitId stays null.
-    limits[result.rateLimits.limitId ?? "default"] = normalizeLimit(result.rateLimits, observedAt);
+    limits[result.rateLimits.limitId ?? "default"] = normalizeLimit(result.rateLimits, observedAt, observedKey);
   }
   const usable = Object.keys(limits).length > 0;
   return {
@@ -107,6 +133,7 @@ export function applyRateLimitsRead(result, { observedAt }) {
     // A read with no usable limits is not a snapshot: telemetry is unavailable, not "fresh".
     readAt: usable ? observedAt : null,
     observedAt,
+    observedKey,
     source: "read",
     lastError: usable ? null : { at: observedAt, message: "the rate-limit read returned no limits" }
   };
@@ -117,7 +144,7 @@ export function applyRateLimitsRead(result, { observedAt }) {
  * merged when the connection that delivered it last read this same, non-null account id; anything
  * ambiguous (no or null identity, a failed read since) is ignored (fail safe) rather than guessed.
  */
-export function applyRateLimitsUpdate(account, snapshot, { observedAt, connectionAccount }) {
+export function applyRateLimitsUpdate(account, snapshot, { observedAt, observedKey = Date.parse(observedAt), connectionAccount }) {
   if (!account || !snapshot || !account.accountId || !connectionAccount?.known || connectionAccount.accountId !== account.accountId) {
     return null;
   }
@@ -126,8 +153,8 @@ export function applyRateLimitsUpdate(account, snapshot, { observedAt, connectio
   if (!key) {
     return null;
   }
-  const previous = account.limits[key] ?? normalizeLimit({ limitId: key }, observedAt);
-  if (Date.parse(previous.observedAt) > Date.parse(observedAt)) {
+  const previous = account.limits[key] ?? normalizeLimit({ limitId: key }, observedAt, observedKey);
+  if (!mayReplace(observedKey, previous.observedKey, previous.observedAt)) {
     // Observed before what is stored (another connection committed first): never go backwards.
     return null;
   }
@@ -144,7 +171,8 @@ export function applyRateLimitsUpdate(account, snapshot, { observedAt, connectio
     }
   }
   merged.observedAt = observedAt;
-  return { ...account, limits: { ...account.limits, [key]: merged }, observedAt, source: "update" };
+  merged.observedKey = observedKey;
+  return { ...account, limits: { ...account.limits, [key]: merged }, observedAt, observedKey, source: "update" };
 }
 
 /** Display-only alias for a window duration; the stored duration is always the real one. */
@@ -160,6 +188,9 @@ export function windowLabel(windowDurationMins) {
 
 function limitFreshness(limit, fallbackObservedAt, now) {
   const observedMs = Date.parse(limit.observedAt ?? fallbackObservedAt);
+  if (observedMs - now > CLOCK_SKEW_TOLERANCE_MS) {
+    return { status: "stale", reason: "observed in the future (the clock changed since)" };
+  }
   for (const window of [limit.primary, limit.secondary]) {
     if (window?.resetsAt && window.resetsAt * 1000 <= now && window.resetsAt * 1000 > observedMs) {
       return { status: "stale", reason: "a window has reset since it was observed" };
@@ -241,7 +272,7 @@ export function deriveContext(tokenUsage) {
   };
 }
 
-export function applyThreadTokenUsage(record, params, { observedAt, workspaceRoot }) {
+export function applyThreadTokenUsage(record, params, { observedAt, observedKey = Date.parse(observedAt), workspaceRoot }) {
   const tokenUsage = {
     total: normalizeBreakdown(params?.tokenUsage?.total),
     last: normalizeBreakdown(params?.tokenUsage?.last),
@@ -253,6 +284,7 @@ export function applyThreadTokenUsage(record, params, { observedAt, workspaceRoo
     workspaceRoot: record?.workspaceRoot ?? workspaceRoot ?? null,
     turnId: params.turnId ?? null,
     observedAt,
+    observedKey,
     source: "thread/tokenUsage/updated",
     tokenUsage,
     context: deriveContext(tokenUsage)
@@ -263,7 +295,10 @@ export function pruneThreads(threads, now = Date.now()) {
   const seenAt = (record) => Date.parse(record.observedAt ?? record.annotatedAt ?? 0);
   const entries = Object.entries(threads ?? {});
   // Open tickets' roots are kept regardless of age or cap (bounded by the number of open tickets).
-  const pinned = entries.filter(([, record]) => record.pinned && now - Date.parse(record.pinned.at ?? 0) <= PIN_MAX_MS);
+  const pinned = entries
+    .filter(([, record]) => record.pinned && now - Date.parse(record.pinned.at ?? 0) <= PIN_MAX_MS)
+    .sort(([, a], [, b]) => Date.parse(b.pinned.at) - Date.parse(a.pinned.at))
+    .slice(0, MAX_THREAD_RECORDS);
   const recent = entries
     .filter(([, record]) => !pinned.some(([, kept]) => kept === record) && now - seenAt(record) <= THREAD_RETENTION_MS)
     .sort(([, a], [, b]) => seenAt(b) - seenAt(a));
@@ -488,13 +523,14 @@ export function createCapacityObserver({ cwd, file } = {}) {
       try {
         if (method === "account/rateLimits/read") {
           const observedAt = new Date().toISOString();
+          const observedKey = observationKey();
           if (error) {
             // A failed read (auth change, old Codex) ends this connection's known identity.
             connectionAccount.known = false;
             connectionAccount.accountId = null;
             const message = String(error.message ?? "read failed").slice(0, 200);
             enqueue((capacity) => {
-              if (Date.parse(capacity.account?.observedAt ?? 0) > Date.parse(observedAt)) {
+              if (!mayReplace(observedKey, capacity.account?.observedKey, capacity.account?.observedAt)) {
                 return false;
               }
               capacity.account = { ...(capacity.account ?? { limits: {} }), lastError: { at: observedAt, message } };
@@ -502,13 +538,13 @@ export function createCapacityObserver({ cwd, file } = {}) {
             });
             return;
           }
-          const account = applyRateLimitsRead(result, { observedAt });
+          const account = applyRateLimitsRead(result, { observedAt, observedKey });
           // Only a usable read with a non-null account id establishes identity for sparse updates.
           connectionAccount.known = Boolean(account.readAt && account.accountId);
           connectionAccount.accountId = connectionAccount.known ? account.accountId : null;
           enqueue((capacity) => {
             // Several connections commit independently: an older snapshot never replaces a newer one.
-            if (Date.parse(capacity.account?.observedAt ?? 0) > Date.parse(observedAt)) {
+            if (!mayReplace(observedKey, capacity.account?.observedKey, capacity.account?.observedAt)) {
               return false;
             }
             capacity.account = account;
@@ -526,8 +562,9 @@ export function createCapacityObserver({ cwd, file } = {}) {
         if (method === "account/rateLimits/updated") {
           const gate = { ...connectionAccount };
           const observedAt = new Date().toISOString();
+          const observedKey = observationKey();
           enqueue((capacity) => {
-            const merged = applyRateLimitsUpdate(capacity.account, params?.rateLimits, { observedAt, connectionAccount: gate });
+            const merged = applyRateLimitsUpdate(capacity.account, params?.rateLimits, { observedAt, observedKey, connectionAccount: gate });
             if (!merged) {
               return false;
             }
@@ -536,12 +573,13 @@ export function createCapacityObserver({ cwd, file } = {}) {
           });
         } else if (method === "thread/tokenUsage/updated" && params?.threadId) {
           const observedAt = new Date().toISOString();
+          const observedKey = observationKey();
           enqueue((capacity) => {
             const existing = capacity.threads[params.threadId];
-            if (Date.parse(existing?.observedAt ?? 0) > Date.parse(observedAt)) {
+            if (!mayReplace(observedKey, existing?.observedKey, existing?.observedAt)) {
               return false;
             }
-            capacity.threads[params.threadId] = applyThreadTokenUsage(existing, params, { observedAt, workspaceRoot: workspace() });
+            capacity.threads[params.threadId] = applyThreadTokenUsage(existing, params, { observedAt, observedKey, workspaceRoot: workspace() });
             return true;
           });
         } else if (method === "thread/started" && params?.thread?.id && params.thread.parentThreadId) {
@@ -572,8 +610,16 @@ export function createCapacityObserver({ cwd, file } = {}) {
               flushing = null;
             });
         }
-        // A flush started before drain may carry the normal lock wait; never wait past the budget.
-        await Promise.race([flushing, new Promise((resolve) => setTimeout(resolve, remaining()))]);
+        // A flush started before drain may carry the normal lock wait; never wait past the budget,
+        // and never leave the losing timer behind (it would hold the process open).
+        let raceTimer = null;
+        await Promise.race([
+          flushing,
+          new Promise((resolve) => {
+            raceTimer = setTimeout(resolve, remaining());
+          })
+        ]);
+        clearTimeout(raceTimer);
         if (queue.length && attempts) {
           await new Promise((resolve) => setTimeout(resolve, Math.min(FLUSH_RETRY_MS, remaining())));
         }
