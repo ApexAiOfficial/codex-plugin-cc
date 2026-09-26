@@ -308,6 +308,8 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     }
 
     this.closed = true;
+    // Bounded: queued capacity observations get a final flush before the connection goes away.
+    await this.capacityObserver?.drain();
 
     if (this.readline) {
       this.readline.close();

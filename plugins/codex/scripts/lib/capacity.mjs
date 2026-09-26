@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-import { withFileLock, writeJsonAtomic } from "./locking.mjs";
+import { withFileLock, withFileLockAsync, writeJsonAtomic } from "./locking.mjs";
 import { resolveStateRootDir } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -29,11 +29,18 @@ const CAPACITY_FILE = "capacity.json";
 // Rate-limit values change through usage this machine does not observe (other sessions, devices,
 // the desktop app share the account), so an account snapshot is only "fresh" for a bounded time.
 export const ACCOUNT_FRESH_MS = 10 * 60 * 1000;
-// Bounded retention: the most recent threads only, and none older than a week.
-export const MAX_THREAD_RECORDS = 64;
+// Bounded retention: nothing older than a week, and at most MAX_THREAD_RECORDS records, evicting
+// subagent threads before root threads (a job's or ticket's root is what status and a guard need).
+export const MAX_THREAD_RECORDS = 256;
 export const THREAD_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-// Telemetry never waits long for the lock: a dropped observation is superseded by the next one.
+// The synchronous writer (tests, tools) never waits long; the observer uses the async path.
 const LOCK_TIMEOUT_MS = 250;
+// Observer flushes: an async lock wait (never blocks the app-server message loop), retried a
+// bounded number of times before an observation is given up.
+const FLUSH_LOCK_TIMEOUT_MS = 2000;
+const FLUSH_RETRY_MS = 250;
+const FLUSH_MAX_ATTEMPTS = 8;
+const DRAIN_TIMEOUT_MS = 1500;
 // Codex TUI's "context left" excludes a fixed baseline (prompts, tools, compaction headroom).
 const CODEX_CONTEXT_BASELINE_TOKENS = 12000;
 const TOKEN_FIELDS = ["totalTokens", "inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens"];
@@ -89,24 +96,26 @@ export function applyRateLimitsRead(result, { observedAt }) {
     // Single-bucket view. With no limitId from Codex the key is "default"; limitId stays null.
     limits[result.rateLimits.limitId ?? "default"] = normalizeLimit(result.rateLimits, observedAt);
   }
+  const usable = Object.keys(limits).length > 0;
   return {
-    accountId: result?.accountId ?? null,
+    accountId: typeof result?.accountId === "string" && result.accountId ? result.accountId : null,
     ordinaryUsageAllowed: typeof result?.ordinaryUsageAllowed === "boolean" ? result.ordinaryUsageAllowed : null,
     limits,
-    readAt: observedAt,
+    // A read with no usable limits is not a snapshot: telemetry is unavailable, not "fresh".
+    readAt: usable ? observedAt : null,
     observedAt,
     source: "read",
-    lastError: null
+    lastError: usable ? null : { at: observedAt, message: "the rate-limit read returned no limits" }
   };
 }
 
 /**
  * Merge a sparse `account/rateLimits/updated` snapshot. It carries no account id, so it is only
- * merged when the connection that delivered it read this same account; anything ambiguous is
- * ignored (fail safe) rather than guessed.
+ * merged when the connection that delivered it last read this same, non-null account id; anything
+ * ambiguous (no or null identity, a failed read since) is ignored (fail safe) rather than guessed.
  */
 export function applyRateLimitsUpdate(account, snapshot, { observedAt, connectionAccount }) {
-  if (!account || !snapshot || !connectionAccount?.known || connectionAccount.accountId !== account.accountId) {
+  if (!account || !snapshot || !account.accountId || !connectionAccount?.known || connectionAccount.accountId !== account.accountId) {
     return null;
   }
   const keys = Object.keys(account.limits ?? {});
@@ -142,21 +151,29 @@ export function windowLabel(windowDurationMins) {
   return isNumber(windowDurationMins) ? `${windowDurationMins}m` : "window";
 }
 
-/** fresh | stale | unavailable, with the evidence behind it. */
-export function accountFreshness(account, now = Date.now()) {
-  if (!account || (!account.readAt && !Object.keys(account.limits ?? {}).length)) {
-    return { status: "unavailable", reason: account?.lastError?.message ?? "never read" };
-  }
-  const observedMs = Date.parse(account.observedAt);
-  for (const limit of Object.values(account.limits ?? {})) {
-    for (const window of [limit.primary, limit.secondary]) {
-      if (window?.resetsAt && window.resetsAt * 1000 <= now && window.resetsAt * 1000 > Date.parse(limit.observedAt ?? account.observedAt)) {
-        return { status: "stale", reason: "a window has reset since it was observed" };
-      }
+function limitFreshness(limit, fallbackObservedAt, now) {
+  const observedMs = Date.parse(limit.observedAt ?? fallbackObservedAt);
+  for (const window of [limit.primary, limit.secondary]) {
+    if (window?.resetsAt && window.resetsAt * 1000 <= now && window.resetsAt * 1000 > observedMs) {
+      return { status: "stale", reason: "a window has reset since it was observed" };
     }
   }
   if (!Number.isFinite(observedMs) || now - observedMs > ACCOUNT_FRESH_MS) {
     return { status: "stale", reason: `older than ${Math.round(ACCOUNT_FRESH_MS / 60000)} minutes` };
+  }
+  return { status: "fresh", reason: null };
+}
+
+/** fresh | stale | unavailable for the whole account: the worst of its buckets, with the evidence. */
+export function accountFreshness(account, now = Date.now()) {
+  if (!account || (!account.readAt && !Object.keys(account.limits ?? {}).length)) {
+    return { status: "unavailable", reason: account?.lastError?.message ?? "never read" };
+  }
+  for (const limit of Object.values(account.limits ?? {})) {
+    const freshness = limitFreshness(limit, account.observedAt, now);
+    if (freshness.status !== "fresh") {
+      return freshness;
+    }
   }
   return { status: "fresh", reason: null };
 }
@@ -236,11 +253,13 @@ export function applyThreadTokenUsage(record, params, { observedAt, workspaceRoo
 }
 
 export function pruneThreads(threads, now = Date.now()) {
-  const entries = Object.entries(threads ?? {})
-    .filter(([, record]) => now - Date.parse(record.observedAt ?? record.annotatedAt ?? 0) <= THREAD_RETENTION_MS)
-    .sort(([, a], [, b]) => Date.parse(b.observedAt ?? b.annotatedAt ?? 0) - Date.parse(a.observedAt ?? a.annotatedAt ?? 0))
-    .slice(0, MAX_THREAD_RECORDS);
-  return Object.fromEntries(entries);
+  const seenAt = (record) => Date.parse(record.observedAt ?? record.annotatedAt ?? 0);
+  const recent = Object.entries(threads ?? {})
+    .filter(([, record]) => now - seenAt(record) <= THREAD_RETENTION_MS)
+    .sort(([, a], [, b]) => seenAt(b) - seenAt(a));
+  const roots = recent.filter(([, record]) => !record.parentThreadId);
+  const subagents = recent.filter(([, record]) => record.parentThreadId);
+  return Object.fromEntries([...roots, ...subagents].slice(0, MAX_THREAD_RECORDS));
 }
 
 /**
@@ -250,6 +269,10 @@ export function pruneThreads(threads, now = Date.now()) {
 export function threadFreshness(record, job = null) {
   if (!record?.tokenUsage) {
     return { status: "unknown", reason: "no token usage observed" };
+  }
+  const running = job?.status === "queued" || job?.status === "running";
+  if (running && (!job.turnId || job.turnId !== record.turnId)) {
+    return { status: "stale", reason: "the running turn has not reported token usage yet" };
   }
   if (job?.turnId && record.turnId && job.turnId !== record.turnId) {
     return { status: "stale", reason: "a newer turn has not reported token usage yet" };
@@ -301,13 +324,47 @@ export function updateCapacity(mutate, { file = resolveCapacityFile(), now = new
 }
 
 /**
- * Observer for one app-server connection that talks to a real `codex app-server` (never a broker
- * client, so nothing is recorded twice). It learns which account the connection reads, so a sparse
- * update is only merged into that account's record.
+ * Async variant for the observer: waits for the lock without blocking the event loop. Resolves to
+ * "written", "unchanged", or "failed" (lock timeout or I/O error; the caller may retry).
  */
-/** @param {{ cwd?: string }} [options] */
-export function createCapacityObserver({ cwd } = {}) {
+export async function updateCapacityAsync(mutate, { file = resolveCapacityFile() } = {}) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    return await withFileLockAsync(
+      `${file}.lock`,
+      () => {
+        const current = readCapacity(file);
+        const next = mutate(current);
+        if (!next) {
+          return "unchanged";
+        }
+        const now = new Date();
+        next.version = CAPACITY_SCHEMA_VERSION;
+        next.updatedAt = now.toISOString();
+        next.threads = pruneThreads(next.threads, now.getTime());
+        writeJsonAtomic(file, next);
+        return "written";
+      },
+      { timeoutMs: FLUSH_LOCK_TIMEOUT_MS, onTimeout: () => "failed" }
+    );
+  } catch {
+    return "failed";
+  }
+}
+
+/**
+ * Observer for one app-server connection that talks to a real `codex app-server` (never a broker
+ * client, so nothing is recorded twice). Observations are queued in memory and flushed
+ * asynchronously, so the connection's message handling never waits on the capacity lock; a failed
+ * flush is retried, and `drain()` gives the queue a bounded final flush when the connection closes.
+ * The observer also learns which account this connection read, so a sparse update is only merged
+ * into that account's record.
+ *
+ * @param {{ cwd?: string, file?: string }} [options]
+ */
+export function createCapacityObserver({ cwd, file } = {}) {
   const connectionAccount = { known: false, accountId: null };
+  const target = () => file ?? resolveCapacityFile();
   let workspaceRoot;
   const workspace = () => {
     if (workspaceRoot === undefined) {
@@ -319,31 +376,94 @@ export function createCapacityObserver({ cwd } = {}) {
     }
     return workspaceRoot;
   };
+
+  /** @type {Array<(capacity: any) => any>} */
+  const queue = [];
+  let timer = null;
+  let flushing = null;
+  let attempts = 0;
+
+  const flush = async () => {
+    const batch = queue.splice(0);
+    if (!batch.length) {
+      return;
+    }
+    const outcome = await updateCapacityAsync(
+      (capacity) => {
+        let changed = false;
+        for (const mutation of batch) {
+          try {
+            if (mutation(capacity)) {
+              changed = true;
+            }
+          } catch {
+            // One malformed observation must not discard the rest of the batch.
+          }
+        }
+        return changed ? capacity : null;
+      },
+      { file: target() }
+    );
+    if (outcome === "failed" && ++attempts < FLUSH_MAX_ATTEMPTS) {
+      queue.unshift(...batch);
+    } else {
+      attempts = 0;
+    }
+  };
+
+  const schedule = (delayMs = 0) => {
+    if (timer || flushing) {
+      return;
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      flushing = flush()
+        .catch(() => {})
+        .finally(() => {
+          flushing = null;
+          if (queue.length) {
+            schedule(attempts ? FLUSH_RETRY_MS : 0);
+          }
+        });
+    }, delayMs);
+    timer.unref?.();
+  };
+
+  const enqueue = (mutation) => {
+    queue.push(mutation);
+    schedule();
+  };
+
   const annotate = (threadId, fields) =>
-    threadId &&
-    updateCapacity((capacity) => {
+    enqueue((capacity) => {
       const existing = capacity.threads[threadId] ?? { threadId, workspaceRoot: workspace() };
       capacity.threads[threadId] = { ...existing, ...fields, annotatedAt: new Date().toISOString() };
-      return capacity;
+      return true;
     });
 
   return {
     onResponse(method, result, error) {
       try {
         if (method === "account/rateLimits/read") {
+          const observedAt = new Date().toISOString();
           if (error) {
-            updateCapacity((capacity) => {
-              capacity.account = { ...(capacity.account ?? { limits: {} }), lastError: { at: new Date().toISOString(), message: String(error.message ?? "read failed").slice(0, 200) } };
-              return capacity;
+            // A failed read (auth change, old Codex) ends this connection's known identity.
+            connectionAccount.known = false;
+            connectionAccount.accountId = null;
+            const message = String(error.message ?? "read failed").slice(0, 200);
+            enqueue((capacity) => {
+              capacity.account = { ...(capacity.account ?? { limits: {} }), lastError: { at: observedAt, message } };
+              return true;
             });
             return;
           }
-          const observedAt = new Date().toISOString();
-          connectionAccount.known = true;
-          connectionAccount.accountId = result?.accountId ?? null;
-          updateCapacity((capacity) => {
-            capacity.account = applyRateLimitsRead(result, { observedAt });
-            return capacity;
+          const account = applyRateLimitsRead(result, { observedAt });
+          // Only a usable read with a non-null account id establishes identity for sparse updates.
+          connectionAccount.known = Boolean(account.readAt && account.accountId);
+          connectionAccount.accountId = connectionAccount.known ? account.accountId : null;
+          enqueue((capacity) => {
+            capacity.account = account;
+            return true;
           });
         } else if (!error && (method === "thread/start" || method === "thread/resume" || method === "thread/fork") && result?.thread?.id) {
           annotate(result.thread.id, { model: result.model ?? null });
@@ -355,21 +475,21 @@ export function createCapacityObserver({ cwd } = {}) {
     onNotification(method, params) {
       try {
         if (method === "account/rateLimits/updated") {
-          updateCapacity((capacity) => {
-            const merged = applyRateLimitsUpdate(capacity.account, params?.rateLimits, { observedAt: new Date().toISOString(), connectionAccount });
+          const gate = { ...connectionAccount };
+          const observedAt = new Date().toISOString();
+          enqueue((capacity) => {
+            const merged = applyRateLimitsUpdate(capacity.account, params?.rateLimits, { observedAt, connectionAccount: gate });
             if (!merged) {
               return false;
             }
             capacity.account = merged;
-            return capacity;
+            return true;
           });
         } else if (method === "thread/tokenUsage/updated" && params?.threadId) {
-          updateCapacity((capacity) => {
-            capacity.threads[params.threadId] = applyThreadTokenUsage(capacity.threads[params.threadId], params, {
-              observedAt: new Date().toISOString(),
-              workspaceRoot: workspace()
-            });
-            return capacity;
+          const observedAt = new Date().toISOString();
+          enqueue((capacity) => {
+            capacity.threads[params.threadId] = applyThreadTokenUsage(capacity.threads[params.threadId], params, { observedAt, workspaceRoot: workspace() });
+            return true;
           });
         } else if (method === "thread/started" && params?.thread?.id && params.thread.parentThreadId) {
           annotate(params.thread.id, { parentThreadId: params.thread.parentThreadId });
@@ -377,7 +497,31 @@ export function createCapacityObserver({ cwd } = {}) {
       } catch {
         // Telemetry is advisory.
       }
-    }
+    },
+    /** Bounded final flush (on connection close): never throws, never waits longer than the bound. */
+    async drain(timeoutMs = DRAIN_TIMEOUT_MS) {
+      const deadline = Date.now() + timeoutMs;
+      const remaining = () => Math.max(0, deadline - Date.now());
+      while ((queue.length || flushing) && remaining() > 0) {
+        if (!flushing) {
+          // Exactly one flush in flight, so batches (a read, then its updates) keep their order.
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          flushing = flush()
+            .catch(() => {})
+            .finally(() => {
+              flushing = null;
+            });
+        }
+        await Promise.race([flushing, new Promise((resolve) => setTimeout(resolve, remaining()))]);
+        if (queue.length && attempts) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(FLUSH_RETRY_MS, remaining())));
+        }
+      }
+    },
+    pendingCount: () => queue.length
   };
 }
 
@@ -401,7 +545,10 @@ export async function settleAccountRead(pending) {
   clearTimeout(timer);
 }
 
-/** Ask the connected app-server for a complete account snapshot; the observer persists it. */
+/**
+ * Ask the connected app-server for a complete account snapshot; the observer persists it.
+ * @param {{ request: (method: "account/rateLimits/read", params: import("./app-server-protocol").AppServerRequestParams<"account/rateLimits/read">) => Promise<import("./app-server-protocol").AppServerResponse<"account/rateLimits/read">> }} client
+ */
 export function requestAccountRateLimits(client) {
   try {
     const pending = client.request("account/rateLimits/read", {});
@@ -436,8 +583,8 @@ function viewLimit(key, limit) {
   };
 }
 
-/** The capacity section of `status --json`: account limits plus this workspace's job threads. */
-export function buildCapacityView(workspaceRoot, jobs = [], { now = Date.now(), file = resolveCapacityFile() } = {}) {
+/** The capacity section of `status --json`: account limits plus the given (this workspace's) job threads. */
+export function buildCapacityView(jobs = [], { now = Date.now(), file = resolveCapacityFile() } = {}) {
   const capacity = readCapacity(file);
   const account = capacity.account;
   const threads = [];
@@ -471,6 +618,8 @@ export function buildCapacityView(workspaceRoot, jobs = [], { now = Date.now(), 
       lastError: account?.lastError ?? null,
       limits: Object.entries(account?.limits ?? {}).map(([key, limit]) => viewLimit(key, limit))
     },
-    threads: workspaceRoot ? threads.filter((thread) => !capacity.threads[thread.threadId]?.workspaceRoot || capacity.threads[thread.threadId].workspaceRoot === workspaceRoot) : threads
+    // The jobs come from this workspace's own index, so their threads belong here, even when the
+    // recording worker ran in a ticket worktree (its record's workspaceRoot is that worktree).
+    threads
   };
 }
