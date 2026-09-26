@@ -304,3 +304,19 @@ test("an older full read neither resurrects a removed bucket nor rolls back acco
   refined = mergeRateLimitsRead(refined, readOf([bucket("a", 30)], true, 30));
   assert.equal(refined.limits.a.primary.usedPercent, 44, "the later update is kept over the read taken before it");
 });
+
+// ---- Turn 6 residual (re-review of f845f52) ----
+
+// A delayed sparse update older than the latest complete read recreated a bucket that read removed.
+test("a sparse update older than the latest complete read cannot resurrect a removed bucket", async () => {
+  const { applyRateLimitsUpdate, mergeRateLimitsRead } = await import("../plugins/codex/scripts/lib/capacity.mjs");
+  const at = (key) => new Date(Date.parse("2026-09-26T12:00:00.000Z") + key).toISOString();
+  const readOf = (buckets, key) =>
+    applyRateLimitsRead({ accountId: "acct", ordinaryUsageAllowed: true, rateLimits: buckets[0], rateLimitsByLimitId: Object.fromEntries(buckets.map((entry) => [entry.limitId, entry])) }, { observedAt: at(key), observedKey: key });
+  const gate = { known: true, accountId: "acct" };
+  let account = readOf([bucket("a", 10), bucket("b", 10)], 10);
+  account = mergeRateLimitsRead(account, readOf([bucket("a", 30)], 30));
+  assert.equal(applyRateLimitsUpdate(account, bucket("b", 20), { observedAt: at(20), observedKey: 20, connectionAccount: gate }), null, "the delayed update is older than the read that removed b");
+  const later = applyRateLimitsUpdate(account, bucket("b", 40), { observedAt: at(40), observedKey: 40, connectionAccount: gate });
+  assert.equal(later.limits.b.primary.usedPercent, 40, "a bucket first seen after the read is still accepted");
+});
