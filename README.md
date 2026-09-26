@@ -24,6 +24,7 @@ Claude stays the lead engineer. It decides when a substantial, repo-local part o
 - **Isolation.** A ticket edits the shared checkout (with disjoint ownership) or an isolated worktree created from your current, uncommitted state. Worktrees integrate back with a per-file three-way merge that never touches your git index, aborts atomically on conflict, and recovers safely after a crash.
 - **Honest capability routing.** Codex's sandbox has no network and a read-only `.git`. Preflight measures what it can run, and installs, network, credentials, and deployment stay with Claude.
 - **Notification instead of polling.** A plugin monitor tells Claude when a ticket turn finishes. The session start lists open tickets after compaction or a restart.
+- **Codex capacity telemetry.** Codex's own account rate limits (every native bucket, with real window durations and reset times) and each running ticket's active context usage. They are persisted to one machine-readable file and shown in `/codex:status` (`--json` for tools). Context occupancy follows Codex's own definition (the latest request, not the cumulative thread total). Missing data is shown as unknown, never as 0%.
 
 Behavior changes compared with upstream:
 
@@ -39,6 +40,7 @@ Environment variables:
 | `CODEX_COMPANION_RPC_TIMEOUT_MS` | `120000` | Per-request app-server timeout (`0` disables) |
 | `CODEX_COMPANION_TURN_PROBE_MS` | `120000` | Quiet period before the turn watchdog checks on a turn |
 | `CODEX_COMPANION_BROKER_IDLE_MS` | `1800000` | Idle time after which the shared broker exits |
+| `CODEX_COMPANION_CAPACITY_FILE` | `<plugin data>/state/capacity.json` | Where capacity telemetry is persisted |
 
 Diagnose runtime health (Codex version skew, broker, workers, tickets, worktrees) with `/codex:doctor`. Operating and recovery procedures are in [`RUNBOOK.md`](./RUNBOOK.md).
 
