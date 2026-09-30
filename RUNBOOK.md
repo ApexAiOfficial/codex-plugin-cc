@@ -85,6 +85,15 @@ Done here on 2026-09-24: 0.144.1 → 0.156.1, and on 2026-09-26: 0.156.1 → 0.1
 
 Symptom: the card says `stopped by usage limits` and shows Codex's message, which includes the reset time ("try again at 11:10 PM"). Nothing ran, and the thread persists. Either wait and `cx followup <ticket>`, or do the work in Claude and `cx close <ticket> --abandoned --reason "…"`. Buying credits or upgrading the plan is the account owner's decision.
 
+### Model policy: DO NOT USE ASTRA — USE GPT-5.6 SOL XHIGH BY DEFAULT [real]
+
+Owner policy for this machine (2026-09-30), until the owner explicitly overrides it:
+- Never use Astra (`gpt-6-astra`, or any "strongest model" selection that resolves to Astra) for Codex work.
+- Default for substantial engineering work: GPT-5.6 Sol at `xhigh` reasoning. Pass it explicitly: `cx delegate … --model gpt-5.6-sol --effort xhigh`. The Codex config default is `gpt-5.6-sol` at `high`; do not rely on a default that might change.
+- Do not auto-upgrade to Astra because it is described as stronger.
+
+**Why this is a capacity policy, not a capability judgement:** during real orchestration (comms-bot P7, 2026-09-29), three parallel Astra lanes consumed essentially the whole 5-hour Codex allowance in about 15 minutes. That ended parallel throughput for hours and stranded half-finished tickets at `stopped by usage limits`. Sustained parallel work needs the most *accepted* work per 5-hour window, not the strongest single call. If parallel lanes still burn pathologically on Sol, reduce the lane count, not the model rule.
+
 ## A turn seems stuck [test]
 
 `cx show <ticket>` shows the heartbeat and recent activity. Silence alone is normal (long reasoning or test runs). After 2 minutes of silence the watchdog asks the app-server whether the thread is still active. It recovers a turn whose completion was lost, and fails the turn only if the app-server stops answering or its connection closes. To stop a turn: `cx cancel <ticket>`. It interrupts the turn through the worker, then kills the worker only if its identity is verified.
